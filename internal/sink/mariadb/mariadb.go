@@ -163,7 +163,7 @@ func (b *backend) WriteBatch(ctx context.Context, records []flow.FlowRecord) err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	ids, err := b.resolveExporters(ctx, tx, records)
+	ids, newlyResolved, err := b.resolveExporters(ctx, tx, records)
 	if err != nil {
 		return err
 	}
@@ -177,10 +177,22 @@ func (b *backend) WriteBatch(ctx context.Context, records []flow.FlowRecord) err
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("mariadb: commit: %w", err)
 	}
+	// Only publish newly resolved ids to the shared cache after a durable
+	// commit. Caching them earlier lets a transaction that later rolls back
+	// (e.g. a deadlock racing another worker's insert for the same
+	// brand-new exporter) poison the cache with an id that no longer
+	// exists, which then fails every subsequent batch's foreign key with no
+	// way to self-heal.
+	for addr, id := range newlyResolved {
+		b.remember(addr, id)
+	}
 	return nil
 }
 
-func (b *backend) resolveExporters(ctx context.Context, tx *sql.Tx, records []flow.FlowRecord) (map[netip.Addr]int64, error) {
+// resolveExporters maps every distinct ExporterAddr in the batch to its id.
+// newlyResolved holds only the ids this call inserted for the first time;
+// the caller must not cache them until its transaction commits.
+func (b *backend) resolveExporters(ctx context.Context, tx *sql.Tx, records []flow.FlowRecord) (ids, newlyResolved map[netip.Addr]int64, err error) {
 	seen := map[netip.Addr]time.Time{}
 	for i := range records {
 		r := &records[i]
@@ -188,13 +200,14 @@ func (b *backend) resolveExporters(ctx context.Context, tx *sql.Tx, records []fl
 			seen[r.ExporterAddr] = micro(r.ReceivedAt)
 		}
 	}
-	ids := make(map[netip.Addr]int64, len(seen))
+	ids = make(map[netip.Addr]int64, len(seen))
+	newlyResolved = map[netip.Addr]int64{}
 	for addr, last := range seen {
 		id, ok := b.cached(addr)
 		if ok {
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE exporters SET last_seen_at = ? WHERE id = ? AND last_seen_at < ?`, last, id, last); err != nil {
-				return nil, fmt.Errorf("mariadb: touch exporter %s: %w", addr, err)
+				return nil, nil, fmt.Errorf("mariadb: touch exporter %s: %w", addr, err)
 			}
 		} else {
 			// LAST_INSERT_ID(id) makes the update path report the existing id.
@@ -204,16 +217,16 @@ func (b *backend) resolveExporters(ctx context.Context, tx *sql.Tx, records []fl
 				    last_seen_at = GREATEST(last_seen_at, VALUES(last_seen_at)),
 				    id = LAST_INSERT_ID(id)`, addr.AsSlice(), last, last)
 			if err != nil {
-				return nil, fmt.Errorf("mariadb: upsert exporter %s: %w", addr, err)
+				return nil, nil, fmt.Errorf("mariadb: upsert exporter %s: %w", addr, err)
 			}
 			if id, err = res.LastInsertId(); err != nil {
-				return nil, fmt.Errorf("mariadb: exporter id %s: %w", addr, err)
+				return nil, nil, fmt.Errorf("mariadb: exporter id %s: %w", addr, err)
 			}
-			b.remember(addr, id)
+			newlyResolved[addr] = id
 		}
 		ids[addr] = id
 	}
-	return ids, nil
+	return ids, newlyResolved, nil
 }
 
 func (b *backend) cached(addr netip.Addr) (int64, bool) {

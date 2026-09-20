@@ -100,7 +100,7 @@ func (b *backend) WriteBatch(ctx context.Context, records []flow.FlowRecord) err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	ids, err := b.resolveExporters(ctx, tx, records)
+	ids, newlyResolved, err := b.resolveExporters(ctx, tx, records)
 	if err != nil {
 		return err
 	}
@@ -115,13 +115,24 @@ func (b *backend) WriteBatch(ctx context.Context, records []flow.FlowRecord) err
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("postgres: commit: %w", err)
 	}
+	// Only publish newly resolved ids to the shared cache after a durable
+	// commit. Caching them earlier lets a transaction that later rolls back
+	// (e.g. a deadlock racing another worker's insert for the same
+	// brand-new exporter) poison the cache with an id that no longer
+	// exists, which then fails every subsequent batch's foreign key with no
+	// way to self-heal.
+	for addr, id := range newlyResolved {
+		b.remember(addr, id)
+	}
 	return nil
 }
 
 // resolveExporters maps every distinct ExporterAddr in the batch to its id,
 // creating the row on first sight and advancing last_seen_at once per batch
-// per exporter — never once per record.
-func (b *backend) resolveExporters(ctx context.Context, tx pgx.Tx, records []flow.FlowRecord) (map[netip.Addr]int64, error) {
+// per exporter — never once per record. newlyResolved holds only the ids
+// this call inserted for the first time; the caller must not cache them
+// until its transaction commits.
+func (b *backend) resolveExporters(ctx context.Context, tx pgx.Tx, records []flow.FlowRecord) (ids, newlyResolved map[netip.Addr]int64, err error) {
 	seen := map[netip.Addr]time.Time{}
 	for i := range records {
 		r := &records[i]
@@ -129,13 +140,14 @@ func (b *backend) resolveExporters(ctx context.Context, tx pgx.Tx, records []flo
 			seen[r.ExporterAddr] = r.ReceivedAt.UTC().Truncate(time.Microsecond)
 		}
 	}
-	ids := make(map[netip.Addr]int64, len(seen))
+	ids = make(map[netip.Addr]int64, len(seen))
+	newlyResolved = map[netip.Addr]int64{}
 	for addr, last := range seen {
 		id, ok := b.cached(addr)
 		if ok {
 			if _, err := tx.Exec(ctx,
 				`UPDATE exporters SET last_seen_at = $2 WHERE id = $1 AND last_seen_at < $2`, id, last); err != nil {
-				return nil, fmt.Errorf("postgres: touch exporter %s: %w", addr, err)
+				return nil, nil, fmt.Errorf("postgres: touch exporter %s: %w", addr, err)
 			}
 		} else {
 			err := tx.QueryRow(ctx, `
@@ -144,13 +156,13 @@ func (b *backend) resolveExporters(ctx context.Context, tx pgx.Tx, records []flo
 				   SET last_seen_at = GREATEST(exporters.last_seen_at, EXCLUDED.last_seen_at)
 				RETURNING id`, addr, last).Scan(&id)
 			if err != nil {
-				return nil, fmt.Errorf("postgres: upsert exporter %s: %w", addr, err)
+				return nil, nil, fmt.Errorf("postgres: upsert exporter %s: %w", addr, err)
 			}
-			b.remember(addr, id)
+			newlyResolved[addr] = id
 		}
 		ids[addr] = id
 	}
-	return ids, nil
+	return ids, newlyResolved, nil
 }
 
 func (b *backend) cached(addr netip.Addr) (int64, bool) {

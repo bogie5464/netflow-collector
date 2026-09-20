@@ -74,24 +74,23 @@ docker compose exec timescaledb psql -U netflow -d netflow -c \
   "SELECT state, count(*) FROM pg_stat_activity WHERE datname='netflow' GROUP BY state;"
 ```
 
-**If the sink is healthy but simply slow, the database host is the ceiling — and it is yours.**
-The collector ships the cheapest write path the dedup contract allows (`docs/performance.md`
-measures every alternative); past that, the number is set by the database, and the levers belong
-to whoever runs it. In the order that pays:
+**If the sink is healthy but slow, sustained throughput is set by the database host.** The
+collector's write path is already the cheapest the dedup contract allows (`docs/performance.md`
+measures the alternatives), so the remaining headroom is in how the database is sized and
+configured. In the order that usually pays:
 
-1. **Give Postgres its own cores.** Each writer connection pins one backend process at ~100% CPU
-   while a batch runs. On one host, the collector, the database and everything else share them.
-   `NFC_WORKERS` should be about the number of cores you are willing to give the database and no
-   more — past that, latency rises and throughput does not (`docs/performance.md` shows the knee).
-2. **Watch what a batch costs, not the queue depth.** `netflow_batch_write_duration_seconds` is the
-   database's number; the buffer and drop counters just report the consequence.
+1. **Database CPU.** Each writer connection keeps one backend process at ~100% CPU while a batch
+   runs. On a shared host the collector and the database compete for the same cores. Set
+   `NFC_WORKERS` to roughly the cores available to the database — beyond that, batch latency
+   rises and throughput does not (`docs/performance.md` shows the knee).
+2. **Watch batch cost, not queue depth.** `netflow_batch_write_duration_seconds` measures the
+   database; the buffer and drop counters report the consequence.
 3. **Standard Postgres/TimescaleDB tuning applies unchanged** — `shared_buffers`, `work_mem`,
-   `max_wal_size`, chunk interval, connection pooling, storage latency. Nothing here is specific
-   to the collector, and `synchronous_commit=off` in particular was measured to change nothing
-   for this write pattern.
-4. **When one database is genuinely saturated, the answer is another database**, not a bigger
-   collector: a second sink on a second host (`NFC_SINKS` fans every batch out to all of them), or
-   a second collector instance with its own exporter set.
+   `max_wal_size`, chunk interval, connection pooling, storage latency. `synchronous_commit=off`
+   in particular was measured to make no difference for this write pattern.
+4. **Past one database's capacity, add capacity rather than workers:** a second sink on a second
+   host (`NFC_SINKS` fans every batch out to all of them), or a second collector instance with
+   its own exporter set.
 
 **MariaDB:** `flow_records` is not partitioned in v1, so retention is a chunked `DELETE` and the
 table grows until it runs. A long-running delete competes with inserts.

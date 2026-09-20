@@ -9,7 +9,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
+	"time"
 
 	"github.com/bogie5464/netflow-collector/internal/app"
 	"github.com/bogie5464/netflow-collector/internal/config"
@@ -57,8 +60,7 @@ func run(args []string) int {
 		}
 		return exitOK
 	case *healthcheck:
-		fmt.Fprintln(os.Stderr, "collector: -healthcheck is not available until the ops endpoints are built")
-		return exitError
+		return runHealthcheck()
 	}
 
 	if *validateConfig {
@@ -88,4 +90,31 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return exitError
 	}
+}
+
+// runHealthcheck GETs /healthz on the local API port and exits 0 on 200,
+// 1 otherwise. It is the container healthcheck: the distroless image has no
+// shell and no curl, so the binary checks itself. It reads NFC_HTTP_ADDR
+// directly because it must work before, and independently of, full
+// configuration validation — the one deliberate exception to the rule that
+// only internal/config reads the environment.
+func runHealthcheck() int {
+	port := "8080"
+	if addr := os.Getenv("NFC_HTTP_ADDR"); addr != "" {
+		if _, p, err := net.SplitHostPort(addr); err == nil && p != "" {
+			port = p
+		}
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://127.0.0.1:" + port + "/healthz")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "collector: healthcheck:", err)
+		return exitError
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "collector: healthcheck: /healthz returned %d\n", resp.StatusCode)
+		return exitError
+	}
+	return exitOK
 }

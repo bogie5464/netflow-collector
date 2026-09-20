@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: build, vet, lint, test, vuln scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Local services for the integration gates
+        run: docker compose up -d --wait redpanda
+
+      - name: Environment
+        run: cp .env.example .env
+
+      - name: Build
+        run: go build -o bin/collector ./cmd/collector
+
+      - name: Tidy check
+        run: go mod tidy -diff
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Lint
+        run: go tool golangci-lint run ./...
+
+      - name: Test
+        run: go test -race -cover ./...
+
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: OpenAPI drift
+        run: ./bin/collector -dump-openapi > /tmp/openapi.json && diff -u docs/openapi.json /tmp/openapi.json
+
+      - name: Services down
+        if: always()
+        run: docker compose down
+
+  image:
+    name: container image
+    runs-on: ubuntu-latest
+    needs: gate
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker compose --profile app build
+      - name: Image size under 20 MB
+        run: test "$(docker image inspect "$(docker compose --profile app images -q collector)" --format '{{.Size}}')" -lt 20971520

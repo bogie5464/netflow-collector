@@ -1,0 +1,12 @@
+# Written before the first image build. The design bundle lives inside the project and
+# would otherwise be copied into every build context; bin/ is host build output; .git/ is
+# history the image never needs; .env holds real credentials.
+blueprints/
+bin/
+.git/
+.env
+.env.*.local
+docs/
+*.md
+.github/
+.claude/

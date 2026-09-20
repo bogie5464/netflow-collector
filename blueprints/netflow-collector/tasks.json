@@ -345,7 +345,7 @@
       ".github/workflows/ci.yml",
       "cmd/collector/main.go"
     ],
-    "status": "pending"
+    "status": "done"
   },
   {
     "id": "E2-T5",

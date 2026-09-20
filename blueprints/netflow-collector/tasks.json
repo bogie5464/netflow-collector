@@ -88,7 +88,7 @@
       "internal/pipeline/pipeline.go",
       "internal/pipeline/pipeline_test.go"
     ],
-    "status": "pending"
+    "status": "done"
   },
   {
     "id": "E1-T4",

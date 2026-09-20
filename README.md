@@ -122,5 +122,4 @@ go build ./... && go test -race ./...
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE). The Architect design bundle this project was built from
-(`blueprints/netflow-collector/`) is kept out of the repository; it is a local design artefact.
+MIT — see [`LICENSE`](LICENSE).

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
@@ -11,12 +12,48 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/moby/moby/api/types/network"
 
 	"github.com/bogie5464/netflow-collector/internal/config"
 	"github.com/bogie5464/netflow-collector/internal/flow"
+	"github.com/bogie5464/netflow-collector/internal/obs"
 	"github.com/bogie5464/netflow-collector/internal/sink/sinktest"
 )
+
+// mariaImage is copied literally from docker-compose.yml, which owns it.
+const mariaImage = "mariadb:11.8.9"
+
+// startMariaDB starts a throwaway MariaDB container and returns a DSN that
+// already carries parseTime=true&loc=UTC. It waits with an explicit SQL probe.
+func startMariaDB(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	dsnFor := func(host string, port network.Port) string {
+		return fmt.Sprintf("netflow:netflow@tcp(%s:%s)/netflow?parseTime=true&loc=UTC&charset=utf8mb4", host, port.Port())
+	}
+	c, err := testcontainers.Run(ctx, mariaImage,
+		testcontainers.WithEnv(map[string]string{
+			"MARIADB_DATABASE":      "netflow",
+			"MARIADB_USER":          "netflow",
+			"MARIADB_PASSWORD":      "netflow",
+			"MARIADB_ROOT_PASSWORD": "netflow",
+		}),
+		testcontainers.WithExposedPorts("3306/tcp"),
+		testcontainers.WithWaitStrategy(wait.ForSQL("3306/tcp", "mysql", dsnFor).WithStartupTimeout(2*time.Minute)),
+	)
+	require.NoError(t, err, "start %s", mariaImage)
+	t.Cleanup(func() { require.NoError(t, testcontainers.TerminateContainer(c)) })
+	host, err := c.Host(ctx)
+	require.NoError(t, err)
+	port, err := c.MappedPort(ctx, "3306/tcp")
+	require.NoError(t, err)
+	return dsnFor(host, port)
+}
 
 // v5Datagram builds one NetFlow v5 datagram with a single record from the
 // documented wire layout: 24-byte header, 48-byte record, big-endian.
@@ -149,6 +186,66 @@ func TestVerticalSlice(t *testing.T) {
 	pc, err := net.ListenPacket("udp", addr.String())
 	require.NoError(t, err)
 	require.NoError(t, pc.Close())
+}
+
+func sampleCount(t *testing.T, sink string) uint64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, obs.BatchWriteDuration.WithLabelValues(sink).(interface{ Write(*dto.Metric) error }).Write(&m))
+	return m.GetHistogram().GetSampleCount()
+}
+
+// TestVerticalSliceFanOut covers NFC_SINKS=postgres,mariadb through the real
+// wiring layer: one datagram lands in both backends and each sink label
+// records its own write duration.
+func TestVerticalSliceFanOut(t *testing.T) {
+	pgDSN := sinktest.StartTimescale(t)
+	maDSN := startMariaDB(t)
+	cfg := config.Config{
+		LogLevel: "info", NetFlowAddr: "127.0.0.1:0",
+		Sources: []string{config.SourceNetFlow}, Sinks: []string{config.SinkPostgres, config.SinkMariaDB},
+		PostgresDSN: pgDSN, MariaDBDSN: maDSN, RetentionDays: 30,
+		PipelineBuffer: 1024, BatchSize: 100, BatchInterval: 100 * time.Millisecond, Workers: 2,
+		PostgresEnabled: true, MariaDBEnabled: true, NetFlowEnabled: true,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a, err := New(ctx, cfg)
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	select {
+	case <-a.Ready():
+	case err := <-done:
+		t.Fatalf("app stopped early: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("app did not start")
+	}
+
+	pgBefore, maBefore := sampleCount(t, "postgres"), sampleCount(t, "mariadb")
+	src, dst := netip.MustParseAddr("203.0.113.10"), netip.MustParseAddr("198.51.100.200")
+	conn, err := net.Dial("udp", a.NetFlowAddr().String())
+	require.NoError(t, err)
+	_, err = conn.Write(v5Datagram(src, dst, 51514, 443, 6, 12, 9000))
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+
+	q := flow.FlowQuery{Start: time.Now().Add(-time.Minute), End: time.Now().Add(time.Minute), Limit: 10}
+	for _, name := range []string{config.SinkPostgres, config.SinkMariaDB} {
+		require.Eventually(t, func() bool {
+			page, err := a.Backend(name).Query(ctx, q)
+			return err == nil && len(page.Records) == 1 && page.Records[0].SrcPort == 51514
+		}, 5*time.Second, 50*time.Millisecond, "record visible in %s", name)
+	}
+	require.Equal(t, pgBefore+1, sampleCount(t, "postgres"), "one batch write observed for sink=postgres")
+	require.Equal(t, maBefore+1, sampleCount(t, "mariadb"), "one batch write observed for sink=mariadb")
+
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("app did not stop")
+	}
 }
 
 func TestVerticalSliceUnknownNamesAreConfigErrors(t *testing.T) {

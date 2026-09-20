@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bogie5464/netflow-collector/internal/flow"
+	"github.com/bogie5464/netflow-collector/internal/obs"
 )
 
 // v5Record is one NetFlow v5 record as the test wants it on the wire.
@@ -174,10 +175,10 @@ func TestV5(t *testing.T) {
 	})
 
 	t.Run("counts a datagram shorter than the v5 header, emits nothing, keeps listening", func(t *testing.T) {
-		before := testutil.ToFloat64(DecodeErrors.WithLabelValues(sourceLabel))
+		before := testutil.ToFloat64(obs.DecodeErrors.WithLabelValues(sourceLabel))
 		send(t, addr, v5Datagram(0, 0, 0)[:16])
 		require.Eventually(t, func() bool {
-			return testutil.ToFloat64(DecodeErrors.WithLabelValues(sourceLabel)) == before+1
+			return testutil.ToFloat64(obs.DecodeErrors.WithLabelValues(sourceLabel)) == before+1
 		}, 2*time.Second, 10*time.Millisecond)
 		select {
 		case r := <-out:
@@ -189,10 +190,10 @@ func TestV5(t *testing.T) {
 	})
 
 	t.Run("counts a v5 datagram whose payload is shorter than its count claims", func(t *testing.T) {
-		before := testutil.ToFloat64(DecodeErrors.WithLabelValues(sourceLabel))
+		before := testutil.ToFloat64(obs.DecodeErrors.WithLabelValues(sourceLabel))
 		send(t, addr, v5Datagram(0, 0, 0, recA, recB)[:24+48])
 		require.Eventually(t, func() bool {
-			return testutil.ToFloat64(DecodeErrors.WithLabelValues(sourceLabel)) == before+1
+			return testutil.ToFloat64(obs.DecodeErrors.WithLabelValues(sourceLabel)) == before+1
 		}, 2*time.Second, 10*time.Millisecond)
 	})
 }
@@ -268,10 +269,10 @@ func TestV9(t *testing.T) {
 	exporter := netip.MustParseAddr("127.0.0.1")
 
 	t.Run("a data datagram before any template decodes to nothing and is counted", func(t *testing.T) {
-		before := testutil.ToFloat64(DecodeErrors.WithLabelValues(sourceLabel))
+		before := testutil.ToFloat64(obs.DecodeErrors.WithLabelValues(sourceLabel))
 		send(t, addr, v9DataDatagram(5000, 1_758_288_000, recA))
 		require.Eventually(t, func() bool {
-			return testutil.ToFloat64(DecodeErrors.WithLabelValues(sourceLabel)) == before+1
+			return testutil.ToFloat64(obs.DecodeErrors.WithLabelValues(sourceLabel)) == before+1
 		}, 2*time.Second, 10*time.Millisecond)
 	})
 

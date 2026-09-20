@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"net/netip"
 	"time"
 
 	"github.com/bogie5464/netflow-collector/internal/config"
@@ -31,22 +30,6 @@ const (
 	CodeBackendUnavailable = "backend_unavailable" // 503
 	CodeInternal           = "internal_error"      // 500
 )
-
-// Exporter is one row of the exporters table as the API renders it.
-type Exporter struct {
-	ID          int64      `json:"id"`
-	IPAddress   netip.Addr `json:"ip_address"`
-	Label       *string    `json:"label"`
-	FirstSeenAt time.Time  `json:"first_seen_at"`
-	LastSeenAt  time.Time  `json:"last_seen_at"`
-}
-
-// ExporterLister is an optional capability a backend may offer for
-// GET /v1/exporters. It is discovered by type assertion so flow.Backend
-// stays exactly as narrow as the storage contract requires.
-type ExporterLister interface {
-	ListExporters(ctx context.Context) ([]Exporter, error)
-}
 
 // Server holds the handler's dependencies.
 type Server struct {

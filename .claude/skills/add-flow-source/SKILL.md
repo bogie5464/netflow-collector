@@ -39,8 +39,9 @@ or a historical store being replayed. The database-import adapter named as a v1 
      protocol)` when the transport can deliver the same record twice. Those two fields together are
      what make one table serve both semantics without a branch in any sink.
 
-5. **Count your own decode failures.** `netflow_packets_decode_errors_total{source="<name>"}` from
-   `internal/obs/metrics.go`. A malformed input increments it, is skipped, and never stops the loop.
+5. **Count your own decode failures.** `obs.DecodeErrors.WithLabelValues("<name>").Inc()` —
+   `netflow_packets_decode_errors_total{source="<name>"}` from `internal/obs/metrics.go`. A
+   malformed input increments it, is skipped, and never stops the loop.
 
 6. **Test without the network where you can.** Construct the input programmatically — the NetFlow
    test builds its own v5 datagram from the documented field layout rather than embedding a captured

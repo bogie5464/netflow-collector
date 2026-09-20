@@ -64,11 +64,13 @@ func decodeInto(s string, c *cursor) error {
 
 type fakeLister struct {
 	flow.Backend
-	exporters []Exporter
+	exporters []flow.Exporter
 	err       error
 }
 
-func (f *fakeLister) ListExporters(context.Context) ([]Exporter, error) { return f.exporters, f.err }
+func (f *fakeLister) ListExporters(context.Context) ([]flow.Exporter, error) {
+	return f.exporters, f.err
+}
 
 func records(n int) []flow.FlowRecord {
 	base := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
@@ -279,12 +281,12 @@ func (panicQuerier) Query(context.Context, flow.FlowQuery) (flow.FlowResultPage,
 
 func TestExporters(t *testing.T) {
 	label := "core-rtr-1"
-	lister := &fakeLister{exporters: []Exporter{{ID: 3, IPAddress: netip.MustParseAddr("198.51.100.7"), Label: &label,
+	lister := &fakeLister{exporters: []flow.Exporter{{ID: 3, IPAddress: netip.MustParseAddr("198.51.100.7"), Label: &label,
 		FirstSeenAt: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), LastSeenAt: time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)}}}
 	rr, env := get(t, newHandler(&fakeQuerier{}, map[string]flow.Backend{"postgres": lister}), "/v1/exporters", nil)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.False(t, env.Meta.HasMore)
-	var data []Exporter
+	var data []ExporterJSON
 	require.NoError(t, json.Unmarshal(env.Data, &data))
 	require.Len(t, data, 1)
 	require.Equal(t, "core-rtr-1", *data[0].Label)

@@ -15,9 +15,9 @@ import (
 	"github.com/bogie5464/netflow-collector/internal/app"
 	"github.com/bogie5464/netflow-collector/internal/config"
 	"github.com/bogie5464/netflow-collector/internal/flow"
+	"github.com/bogie5464/netflow-collector/internal/obs"
 	"github.com/bogie5464/netflow-collector/internal/sink/sinktest"
 	"github.com/bogie5464/netflow-collector/internal/source/kafka"
-	"github.com/bogie5464/netflow-collector/internal/source/netflow"
 )
 
 // brokers is the compose redpanda service's advertised address; the compose
@@ -193,13 +193,13 @@ func TestKafkaPoisonMessageIsCountedAndCommittedPast(t *testing.T) {
 	topic, group := uniqueName(t, "topic"), uniqueName(t, "group")
 	out, stop := startSource(t, topic, group)
 
-	before := testutil.ToFloat64(netflow.DecodeErrors.WithLabelValues("kafka"))
+	before := testutil.ToFloat64(obs.DecodeErrors.WithLabelValues("kafka"))
 	produce(t, cl, topic, time.Time{}, []byte(`{"this is": "not a flow"}`))
 	produce(t, cl, topic, time.Time{}, withReceivedAt(sample, time.Date(2026, 9, 19, 12, 0, 1, 0, time.UTC)))
 	got := recv(t, out, 30*time.Second)
 	require.Equal(t, uint16(51514), got.SrcPort, "the consumer keeps going after a poison message")
 	require.Eventually(t, func() bool {
-		return testutil.ToFloat64(netflow.DecodeErrors.WithLabelValues("kafka")) == before+1
+		return testutil.ToFloat64(obs.DecodeErrors.WithLabelValues("kafka")) == before+1
 	}, 5*time.Second, 20*time.Millisecond)
 	_, err := stop()
 	require.NoError(t, err)
@@ -207,7 +207,7 @@ func TestKafkaPoisonMessageIsCountedAndCommittedPast(t *testing.T) {
 	// Committed past it: a new consumer in the same group sees only what is
 	// produced after the restart, not the poison message or its neighbour.
 	out2, _ := startSource(t, topic, group)
-	after := testutil.ToFloat64(netflow.DecodeErrors.WithLabelValues("kafka"))
+	after := testutil.ToFloat64(obs.DecodeErrors.WithLabelValues("kafka"))
 	produce(t, cl, topic, time.Time{}, withReceivedAt(sample, time.Date(2026, 9, 19, 12, 0, 2, 0, time.UTC)))
 	got = recv(t, out2, 30*time.Second)
 	require.Equal(t, time.Date(2026, 9, 19, 12, 0, 2, 0, time.UTC), got.ReceivedAt, "only the new message is delivered")
@@ -216,7 +216,7 @@ func TestKafkaPoisonMessageIsCountedAndCommittedPast(t *testing.T) {
 		t.Fatalf("earlier record redelivered after commit: %+v", extra)
 	case <-time.After(500 * time.Millisecond):
 	}
-	require.Equal(t, after, testutil.ToFloat64(netflow.DecodeErrors.WithLabelValues("kafka")), "poison message was not re-read")
+	require.Equal(t, after, testutil.ToFloat64(obs.DecodeErrors.WithLabelValues("kafka")), "poison message was not re-read")
 }
 
 // TestKafkaRedeliveryDedupsInBackend runs the real wiring: the same message

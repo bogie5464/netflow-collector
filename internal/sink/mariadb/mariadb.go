@@ -232,51 +232,35 @@ func (b *backend) remember(addr netip.Addr, id int64) {
 	b.cache[addr] = id
 }
 
-const insertPrefix = `INSERT IGNORE INTO flow_records (
-    received_at, exporter_id, flow_type, first_switched, last_switched,
-    src_addr, dst_addr, src_port, dst_port, protocol, tcp_flags,
-    packets, bytes, sampling_rate, input_iface, output_iface, src_as, dst_as,
-    next_hop, dedup_key) VALUES `
-
-const insertRow = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
-
-func micro(t time.Time) time.Time { return t.UTC().Truncate(time.Microsecond) }
-
-func addrBytes(a netip.Addr) []byte {
-	if !a.IsValid() {
-		return nil
+// ListExporters returns every known exporter, ordered by id. It implements
+// flow.ExporterLister, an optional capability discovered by type assertion —
+// flow.Backend itself never widens.
+func (b *backend) ListExporters(ctx context.Context) ([]flow.Exporter, error) {
+	rows, err := b.db.QueryContext(ctx,
+		`SELECT id, ip_address, label, first_seen_at, last_seen_at FROM exporters ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("mariadb: list exporters: %w", err)
 	}
-	return a.AsSlice()
-}
+	defer func() { _ = rows.Close() }()
 
-// insertStatement renders one multi-row INSERT IGNORE for records.
-func insertStatement(records []flow.FlowRecord, ids map[netip.Addr]int64) (string, []any) {
-	var sb strings.Builder
-	sb.WriteString(insertPrefix)
-	args := make([]any, 0, 20*len(records))
-	for i := range records {
-		r := &records[i]
-		if i > 0 {
-			sb.WriteByte(',')
+	var out []flow.Exporter
+	for rows.Next() {
+		var (
+			e  flow.Exporter
+			ip []byte
+		)
+		if err := rows.Scan(&e.ID, &ip, &e.Label, &e.FirstSeenAt, &e.LastSeenAt); err != nil {
+			return nil, fmt.Errorf("mariadb: scan exporter: %w", err)
 		}
-		sb.WriteString(insertRow)
-		args = append(args,
-			micro(r.ReceivedAt), ids[r.ExporterAddr], string(r.FlowType), micro(r.FirstSwitched), micro(r.LastSwitched),
-			r.SrcAddr.AsSlice(), r.DstAddr.AsSlice(), r.SrcPort, r.DstPort, r.Protocol, r.TCPFlags,
-			r.Packets, r.Bytes, r.SamplingRate, r.InputIface, r.OutputIface, r.SrcAS, r.DstAS,
-			addrBytes(r.NextHop), r.DedupKey)
+		e.IPAddress, _ = netip.AddrFromSlice(ip)
+		e.FirstSeenAt, e.LastSeenAt = e.FirstSeenAt.UTC(), e.LastSeenAt.UTC()
+		out = append(out, e)
 	}
-	return sb.String(), args
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("mariadb: list exporters rows: %w", err)
+	}
+	return out, nil
 }
-
-const selectSQL = `
-SELECT f.received_at, f.seq, f.exporter_id, e.ip_address, f.flow_type,
-       f.first_switched, f.last_switched, f.src_addr, f.dst_addr,
-       f.src_port, f.dst_port, f.protocol, f.tcp_flags,
-       f.packets, f.bytes, f.sampling_rate, f.input_iface, f.output_iface,
-       f.src_as, f.dst_as, f.next_hop, f.dedup_key
-  FROM flow_records f
-  JOIN exporters e ON e.id = f.exporter_id`
 
 // Query answers one page ordered by (received_at DESC, seq DESC) using a
 // keyset cursor over the same pair, via a row constructor comparison.
@@ -342,35 +326,6 @@ func (b *backend) Query(ctx context.Context, q flow.FlowQuery) (flow.FlowResultP
 		page.NextCursor = encodeCursor(cursor{T: last.ReceivedAt.UnixNano(), Seq: lastSeq})
 	}
 	return page, nil
-}
-
-func scanRecord(rows *sql.Rows) (flow.FlowRecord, int64, error) {
-	var (
-		r                           flow.FlowRecord
-		seq                         int64
-		exporter, src, dst, nextHop []byte
-		flowType                    string
-	)
-	err := rows.Scan(&r.ReceivedAt, &seq, &r.ExporterID, &exporter, &flowType,
-		&r.FirstSwitched, &r.LastSwitched, &src, &dst,
-		&r.SrcPort, &r.DstPort, &r.Protocol, &r.TCPFlags,
-		&r.Packets, &r.Bytes, &r.SamplingRate, &r.InputIface, &r.OutputIface,
-		&r.SrcAS, &r.DstAS, &nextHop, &r.DedupKey)
-	if err != nil {
-		return r, 0, err
-	}
-	r.ReceivedAt, r.FirstSwitched, r.LastSwitched = r.ReceivedAt.UTC(), r.FirstSwitched.UTC(), r.LastSwitched.UTC()
-	r.FlowType = flow.FlowType(flowType)
-	r.ExporterAddr, _ = netip.AddrFromSlice(exporter)
-	r.SrcAddr, _ = netip.AddrFromSlice(src)
-	r.DstAddr, _ = netip.AddrFromSlice(dst)
-	if nextHop != nil {
-		r.NextHop, _ = netip.AddrFromSlice(nextHop)
-	}
-	if len(r.DedupKey) == 0 {
-		r.DedupKey = nil
-	}
-	return r, seq, nil
 }
 
 type cursor struct {

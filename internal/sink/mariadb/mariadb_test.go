@@ -3,24 +3,18 @@ package mariadb_test
 import (
 	"context"
 	"database/sql"
-	"encoding/binary"
 	"fmt"
-	"net"
 	"net/netip"
 	"testing"
 	"time"
 
-	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/moby/moby/api/types/network"
 
-	"github.com/bogie5464/netflow-collector/internal/app"
-	"github.com/bogie5464/netflow-collector/internal/config"
 	"github.com/bogie5464/netflow-collector/internal/flow"
-	"github.com/bogie5464/netflow-collector/internal/obs"
 	"github.com/bogie5464/netflow-collector/internal/sink/mariadb"
 	"github.com/bogie5464/netflow-collector/internal/sink/sinktest"
 )
@@ -131,87 +125,20 @@ func TestMariaDBRejectsDSNWithoutUTCParseTime(t *testing.T) {
 	require.ErrorContains(t, err, "parseTime=true&loc=UTC")
 }
 
-// v5Datagram builds one NetFlow v5 datagram with a single record.
-func v5Datagram(srcPort uint16) []byte {
-	b := binary.BigEndian.AppendUint16(nil, 5)
-	b = binary.BigEndian.AppendUint16(b, 1)
-	b = binary.BigEndian.AppendUint32(b, 10_000)
-	b = binary.BigEndian.AppendUint32(b, uint32(time.Now().Unix()))
-	b = binary.BigEndian.AppendUint32(b, 0)
-	b = binary.BigEndian.AppendUint32(b, 1)
-	b = append(b, 0, 0)
-	b = binary.BigEndian.AppendUint16(b, 0)
-	b = append(b, 203, 0, 113, 10, 198, 51, 100, 200, 0, 0, 0, 0)
-	b = binary.BigEndian.AppendUint16(b, 3)
-	b = binary.BigEndian.AppendUint16(b, 7)
-	b = binary.BigEndian.AppendUint32(b, 12)
-	b = binary.BigEndian.AppendUint32(b, 9000)
-	b = binary.BigEndian.AppendUint32(b, 1000)
-	b = binary.BigEndian.AppendUint32(b, 2500)
-	b = binary.BigEndian.AppendUint16(b, srcPort)
-	b = binary.BigEndian.AppendUint16(b, 443)
-	b = append(b, 0, 24, 6, 0)
-	b = binary.BigEndian.AppendUint16(b, 64500)
-	b = binary.BigEndian.AppendUint16(b, 64501)
-	b = append(b, 24, 24, 0, 0)
-	return b
-}
+func TestMariaDBListExporters(t *testing.T) {
+	b := newBackend(t, startMariaDB(t))
+	lister, ok := b.(flow.ExporterLister)
+	require.True(t, ok, "mariadb backend must implement flow.ExporterLister")
 
-func sampleCount(t *testing.T, sink string) uint64 {
-	t.Helper()
-	var m dto.Metric
-	require.NoError(t, obs.BatchWriteDuration.WithLabelValues(sink).(interface{ Write(*dto.Metric) error }).Write(&m))
-	return m.GetHistogram().GetSampleCount()
-}
+	exporter := netip.MustParseAddr("192.0.2.60")
+	rec := sinktest.Fixture(0, exporter, time.Now().UTC(), false)
+	require.NoError(t, b.WriteBatch(context.Background(), []flow.FlowRecord{rec}))
 
-// TestMariaDBFanOut covers NFC_SINKS=postgres,mariadb through the real
-// wiring layer: one datagram lands in both backends and each sink label
-// records its own write duration.
-func TestMariaDBFanOut(t *testing.T) {
-	pgDSN := sinktest.StartTimescale(t)
-	maDSN := startMariaDB(t)
-	cfg := config.Config{
-		LogLevel: "info", NetFlowAddr: "127.0.0.1:0",
-		Sources: []string{config.SourceNetFlow}, Sinks: []string{config.SinkPostgres, config.SinkMariaDB},
-		PostgresDSN: pgDSN, MariaDBDSN: maDSN, RetentionDays: 30,
-		PipelineBuffer: 1024, BatchSize: 100, BatchInterval: 100 * time.Millisecond, Workers: 2,
-		PostgresEnabled: true, MariaDBEnabled: true, NetFlowEnabled: true,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	a, err := app.New(ctx, cfg)
+	got, err := lister.ListExporters(context.Background())
 	require.NoError(t, err)
-	done := make(chan error, 1)
-	go func() { done <- a.Run(ctx) }()
-	select {
-	case <-a.Ready():
-	case err := <-done:
-		t.Fatalf("app stopped early: %v", err)
-	case <-time.After(30 * time.Second):
-		t.Fatal("app did not start")
-	}
-
-	pgBefore, maBefore := sampleCount(t, "postgres"), sampleCount(t, "mariadb")
-	conn, err := net.Dial("udp", a.NetFlowAddr().String())
-	require.NoError(t, err)
-	_, err = conn.Write(v5Datagram(51514))
-	require.NoError(t, err)
-	require.NoError(t, conn.Close())
-
-	q := flow.FlowQuery{Start: time.Now().Add(-time.Minute), End: time.Now().Add(time.Minute), Limit: 10}
-	for _, name := range []string{"postgres", "mariadb"} {
-		require.Eventually(t, func() bool {
-			page, err := a.Backend(name).Query(ctx, q)
-			return err == nil && len(page.Records) == 1 && page.Records[0].SrcPort == 51514
-		}, 5*time.Second, 50*time.Millisecond, "record visible in %s", name)
-	}
-	require.Equal(t, pgBefore+1, sampleCount(t, "postgres"), "one batch write observed for sink=postgres")
-	require.Equal(t, maBefore+1, sampleCount(t, "mariadb"), "one batch write observed for sink=mariadb")
-
-	cancel()
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("app did not stop")
-	}
+	require.Len(t, got, 1)
+	require.Equal(t, exporter, got[0].IPAddress)
+	require.Nil(t, got[0].Label)
+	require.False(t, got[0].FirstSeenAt.IsZero())
+	require.False(t, got[0].LastSeenAt.IsZero())
 }

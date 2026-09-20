@@ -8,9 +8,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// The six pipeline instruments. Names are a public interface: the runbook,
+// The seven pipeline instruments. Names are a public interface: the runbook,
 // the alerts and the step 10 /metrics gate all assert on them.
 var (
+	// DecodeErrors counts datagrams and messages that could not be decoded,
+	// by source. A malformed input increments it, is skipped, and never
+	// stops a loop.
+	DecodeErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "netflow_packets_decode_errors_total",
+		Help: "Datagrams or messages that failed to decode, by source.",
+	}, []string{"source"})
+
 	// RecordsIngested counts records accepted into the bounded buffer, by
 	// source. With RecordsDropped it satisfies ingested + dropped == offered.
 	RecordsIngested = promauto.NewCounterVec(prometheus.CounterOpts{

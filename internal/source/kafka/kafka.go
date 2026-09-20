@@ -24,7 +24,7 @@ import (
 
 	"github.com/bogie5464/netflow-collector/internal/config"
 	"github.com/bogie5464/netflow-collector/internal/flow"
-	"github.com/bogie5464/netflow-collector/internal/source/netflow"
+	"github.com/bogie5464/netflow-collector/internal/obs"
 )
 
 const sourceLabel = "kafka"
@@ -119,7 +119,7 @@ func (s *Source) Start(ctx context.Context, out chan<- flow.FlowRecord) error {
 			cl.MarkCommitRecords(r)
 			rec, err := Decode(r.Value, r.Timestamp)
 			if err != nil {
-				netflow.DecodeErrors.WithLabelValues(sourceLabel).Inc()
+				obs.DecodeErrors.WithLabelValues(sourceLabel).Inc()
 				s.log.Debug("kafka decode failed", "partition", r.Partition, "offset", r.Offset, "err", err)
 				return
 			}

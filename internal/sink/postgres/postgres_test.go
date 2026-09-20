@@ -2,7 +2,9 @@ package postgres
 
 import (
 	"context"
+	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
@@ -74,4 +76,22 @@ func TestPostgresRejectsBadCursor(t *testing.T) {
 	b := newBackend(t, sinktest.StartTimescale(t))
 	_, err := b.Query(context.Background(), flow.FlowQuery{Cursor: "not-a-cursor"})
 	require.ErrorIs(t, err, ErrBadCursor)
+}
+
+func TestPostgresListExporters(t *testing.T) {
+	b := newBackend(t, sinktest.StartTimescale(t))
+	lister, ok := b.(flow.ExporterLister)
+	require.True(t, ok, "postgres backend must implement flow.ExporterLister")
+
+	exporter := netip.MustParseAddr("192.0.2.50")
+	rec := sinktest.Fixture(0, exporter, time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC), false)
+	require.NoError(t, b.WriteBatch(context.Background(), []flow.FlowRecord{rec}))
+
+	got, err := lister.ListExporters(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, exporter, got[0].IPAddress)
+	require.Nil(t, got[0].Label)
+	require.False(t, got[0].FirstSeenAt.IsZero())
+	require.False(t, got[0].LastSeenAt.IsZero())
 }

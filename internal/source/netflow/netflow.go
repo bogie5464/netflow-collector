@@ -14,11 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-
 	"github.com/bogie5464/netflow-collector/internal/config"
 	"github.com/bogie5464/netflow-collector/internal/flow"
+	"github.com/bogie5464/netflow-collector/internal/obs"
 )
 
 // maxDatagram is the largest UDP payload; every read uses a buffer this size.
@@ -27,13 +25,6 @@ const maxDatagram = 65535
 // sourceLabel is the value of the source label on every metric this package
 // touches.
 const sourceLabel = "netflow"
-
-// DecodeErrors counts datagrams and messages that could not be decoded, by
-// source. A malformed input increments it, is skipped, and never stops a loop.
-var DecodeErrors = promauto.NewCounterVec(prometheus.CounterOpts{
-	Name: "netflow_packets_decode_errors_total",
-	Help: "Datagrams or messages that failed to decode, by source.",
-}, []string{"source"})
 
 // Source is a NetFlow/IPFIX listener. Create it with New.
 type Source struct {
@@ -120,7 +111,7 @@ func (s *Source) Start(ctx context.Context, out chan<- flow.FlowRecord) error {
 		receivedAt := s.now().UTC().Truncate(time.Microsecond)
 		records, err := s.dec.decode(buf[:n], exporter, receivedAt)
 		if err != nil {
-			DecodeErrors.WithLabelValues(sourceLabel).Inc()
+			obs.DecodeErrors.WithLabelValues(sourceLabel).Inc()
 			s.log.Debug("netflow decode failed", "exporter", exporter, "len", n, "err", err)
 			continue
 		}

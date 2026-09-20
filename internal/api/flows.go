@@ -81,6 +81,23 @@ func toJSON(r flow.FlowRecord) FlowJSON {
 	return out
 }
 
+// ExporterJSON is one exporter as the API renders it.
+type ExporterJSON struct {
+	ID          int64      `json:"id"`
+	IPAddress   netip.Addr `json:"ip_address"`
+	Label       *string    `json:"label"`
+	FirstSeenAt string     `json:"first_seen_at"`
+	LastSeenAt  string     `json:"last_seen_at"`
+}
+
+func toExporterJSON(e flow.Exporter) ExporterJSON {
+	return ExporterJSON{
+		ID: e.ID, IPAddress: e.IPAddress, Label: e.Label,
+		FirstSeenAt: e.FirstSeenAt.UTC().Format(timeFormat),
+		LastSeenAt:  e.LastSeenAt.UTC().Format(timeFormat),
+	}
+}
+
 // route ties a method and path to a request struct and a handler; the
 // OpenAPI builder walks the same table.
 type route struct {
@@ -149,7 +166,7 @@ func (s *Server) exporters(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		lister, ok := s.backends[name].(ExporterLister)
+		lister, ok := s.backends[name].(flow.ExporterLister)
 		if !ok {
 			continue
 		}
@@ -158,10 +175,11 @@ func (s *Server) exporters(w http.ResponseWriter, r *http.Request) {
 			s.log.Error("list exporters failed", "request_id", RequestID(r.Context()), "backend", name, "err", err)
 			continue
 		}
-		if list == nil {
-			list = []Exporter{}
+		data := make([]ExporterJSON, 0, len(list))
+		for _, e := range list {
+			data = append(data, toExporterJSON(e))
 		}
-		writeData(w, list, meta{HasMore: false})
+		writeData(w, data, meta{HasMore: false})
 		return
 	}
 	writeError(w, r, http.StatusServiceUnavailable, CodeBackendUnavailable, "no configured backend can list exporters", nil)

@@ -29,13 +29,15 @@
       "internal/config/config_test.go",
       "cmd/collector/main.go"
     ],
-    "status": "pending"
+    "status": "done"
   },
   {
     "id": "E1-T2",
     "title": "Add NetFlow v5/v9/IPFIX UDP source",
     "epic": "01-ingest-core",
-    "dependencies": ["E1-T1"],
+    "dependencies": [
+      "E1-T1"
+    ],
     "priority": "p0",
     "acceptance": [
       "WHEN a NetFlow v5 datagram carrying 2 flow records is sent to the listener's UDP port THE SYSTEM SHALL emit exactly 2 records on the output channel with `flow_type` `netflow5`.",
@@ -63,7 +65,9 @@
     "id": "E1-T3",
     "title": "Add bounded ingest pipeline with drop accounting",
     "epic": "01-ingest-core",
-    "dependencies": ["E1-T1"],
+    "dependencies": [
+      "E1-T1"
+    ],
     "priority": "p0",
     "acceptance": [
       "WHEN a source offers more records than the bounded channel can hold and every sink is blocked THE SYSTEM SHALL drop the excess, increment `netflow_records_dropped_total{reason=\"buffer_full\"}` once per dropped record, and never block the sending source.",
@@ -90,7 +94,9 @@
     "id": "E1-T4",
     "title": "Add Postgres/TimescaleDB backend and conformance suite",
     "epic": "01-ingest-core",
-    "dependencies": ["E1-T3"],
+    "dependencies": [
+      "E1-T3"
+    ],
     "priority": "p0",
     "acceptance": [
       "WHEN `Migrate` runs against an empty PostgreSQL/TimescaleDB database THE SYSTEM SHALL create the `exporters` and `flow_records` tables and convert `flow_records` into a hypertable partitioned on `received_at`, and a second run SHALL change nothing and exit 0.",
@@ -121,7 +127,10 @@
     "id": "E1-T5",
     "title": "Wire the UDP to Postgres vertical slice",
     "epic": "01-ingest-core",
-    "dependencies": ["E1-T2", "E1-T4"],
+    "dependencies": [
+      "E1-T2",
+      "E1-T4"
+    ],
     "priority": "p0",
     "acceptance": [
       "WHEN the collector starts with `NFC_SOURCES=netflow` and `NFC_SINKS=postgres` against a live TimescaleDB THE SYSTEM SHALL apply migrations at boot and then listen on `NFC_NETFLOW_ADDR`.",
@@ -149,7 +158,9 @@
     "id": "E1-T6",
     "title": "Add MariaDB backend passing the same suite",
     "epic": "01-ingest-core",
-    "dependencies": ["E1-T5"],
+    "dependencies": [
+      "E1-T5"
+    ],
     "priority": "p0",
     "acceptance": [
       "WHEN `sinktest.Conformance` runs against the MariaDB backend THE SYSTEM SHALL pass all six assertions with 0 failures, using the same suite source file as the Postgres backend with no MariaDB-specific branch inside it.",
@@ -179,7 +190,9 @@
     "id": "E1-T7",
     "title": "Add Kafka source with dedup on write",
     "epic": "01-ingest-core",
-    "dependencies": ["E1-T6"],
+    "dependencies": [
+      "E1-T6"
+    ],
     "priority": "p1",
     "acceptance": [
       "WHEN a JSON flow message is produced to `NFC_KAFKA_TOPIC` THE SYSTEM SHALL decode it and emit one record whose fields equal the message's fields.",
@@ -207,7 +220,9 @@
     "id": "E2-T1",
     "title": "Add REST query API with cursor pagination",
     "epic": "02-serving-and-operations",
-    "dependencies": ["E1-T7"],
+    "dependencies": [
+      "E1-T7"
+    ],
     "priority": "p0",
     "acceptance": [
       "WHEN `GET /v1/flows` is requested with a valid `start` and `end` THE SYSTEM SHALL return 200 and a body shaped `{\"data\":[...],\"meta\":{\"next_cursor\":...,\"has_more\":...}}`.",
@@ -239,7 +254,9 @@
     "id": "E2-T2",
     "title": "Add static API key middleware on /v1",
     "epic": "02-serving-and-operations",
-    "dependencies": ["E2-T1"],
+    "dependencies": [
+      "E2-T1"
+    ],
     "priority": "p0",
     "acceptance": [
       "WHEN a request to `/v1/flows` carries no `Authorization` header THE SYSTEM SHALL return 401 with `error.code` `unauthorized` and no flow data.",
@@ -268,7 +285,9 @@
     "id": "E2-T3",
     "title": "Add logging, metrics, tracing and health endpoints",
     "epic": "02-serving-and-operations",
-    "dependencies": ["E2-T2"],
+    "dependencies": [
+      "E2-T2"
+    ],
     "priority": "p0",
     "acceptance": [
       "WHEN `GET /metrics` is requested THE SYSTEM SHALL return 200 in Prometheus text format containing `netflow_records_ingested_total`, `netflow_records_dropped_total`, `netflow_batch_write_duration_seconds`, `netflow_batch_write_errors_total`, `netflow_pipeline_buffer_length` and `netflow_record_visibility_lag_seconds`.",
@@ -298,7 +317,9 @@
     "id": "E2-T4",
     "title": "Add container image and CI pipeline",
     "epic": "02-serving-and-operations",
-    "dependencies": ["E2-T3"],
+    "dependencies": [
+      "E2-T3"
+    ],
     "priority": "p1",
     "acceptance": [
       "WHEN `docker compose --profile app build` runs THE SYSTEM SHALL produce an image whose final stage is `gcr.io/distroless/static:nonroot`, which carries a statically linked binary at `/usr/local/bin/collector`, and whose total size is under 20 MB (20971520 bytes) — proving the distroless/static base and CGO_ENABLED=0 actually held rather than trusting the Dockerfile to be right.",
@@ -330,7 +351,9 @@
     "id": "E2-T5",
     "title": "Write README, architecture, runbook and extension docs",
     "epic": "02-serving-and-operations",
-    "dependencies": ["E2-T4"],
+    "dependencies": [
+      "E2-T4"
+    ],
     "priority": "p1",
     "acceptance": [
       "WHEN `README.md` is read THE SYSTEM SHALL contain the literal commands `go build -o bin/collector ./cmd/collector`, `docker compose up -d --wait`, `go test -race ./...` and `go mod edit -module`.",
@@ -363,7 +386,9 @@
     "id": "E2-T6",
     "title": "Add load verification and whole-tree race gate",
     "epic": "02-serving-and-operations",
-    "dependencies": ["E2-T5"],
+    "dependencies": [
+      "E2-T5"
+    ],
     "priority": "p1",
     "acceptance": [
       "WHEN the load test offers 200000 synthetic records to the pipeline with an in-memory sink THE SYSTEM SHALL sustain at least 20000 records per second and report 0 drops.",

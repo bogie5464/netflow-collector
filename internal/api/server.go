@@ -56,15 +56,21 @@ type Server struct {
 	log      *slog.Logger
 }
 
-// New builds the HTTP handler: /v1 routes wrapped in the middleware chain.
+// New builds the HTTP handler. The /v1 subtree is mounted exactly once,
+// behind the API key middleware; everything registered on the outer mux
+// (the ops endpoints) stays public.
 func New(q flow.Querier, backends map[string]flow.Backend, cfg config.Config) http.Handler {
 	s := &Server{querier: q, backends: backends, cfg: cfg, log: slog.Default().With("component", "api")}
-	mux := http.NewServeMux()
+	v1 := http.NewServeMux()
 	for _, r := range routes {
 		h := r.handler
-		mux.HandleFunc(r.Method+" "+r.Path, func(w http.ResponseWriter, req *http.Request) { h(s, w, req) })
-		mux.HandleFunc(r.Path, methodNotAllowed) // any other method on a known path
+		v1.HandleFunc(r.Method+" "+r.Path, func(w http.ResponseWriter, req *http.Request) { h(s, w, req) })
+		v1.HandleFunc(r.Path, methodNotAllowed) // any other method on a known path
 	}
+	v1.HandleFunc("/", notFound)
+
+	mux := http.NewServeMux()
+	mux.Handle("/v1/", requireAPIKey(cfg.APIKeys, s.log, v1))
 	mux.HandleFunc("/", notFound)
 	return s.middleware(mux)
 }

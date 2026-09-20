@@ -279,7 +279,7 @@
       "internal/api/auth_test.go",
       "internal/api/server.go"
     ],
-    "status": "pending"
+    "status": "done"
   },
   {
     "id": "E2-T3",

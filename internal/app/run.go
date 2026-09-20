@@ -57,9 +57,13 @@ func signalContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 }
 
-// CheckNames rejects a source or sink this binary does not implement. It is
-// pure so -validate-config can run it without touching a database.
+// CheckNames rejects a source or sink this binary does not implement, and a
+// configuration that would serve /v1 without a key. It is pure so
+// -validate-config can run it without touching a database.
 func CheckNames(cfg config.Config) error {
+	if err := api.CheckConfig(cfg); err != nil {
+		return fmt.Errorf("%w: %w", ErrConfig, err)
+	}
 	for _, s := range cfg.Sinks {
 		switch s {
 		case config.SinkPostgres, config.SinkMariaDB:

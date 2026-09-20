@@ -255,6 +255,7 @@ func TestRoutingErrors(t *testing.T) {
 	require.Equal(t, rr.Header().Get("X-Request-Id"), env.Error.RequestID)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/flows", nil)
+	req.Header.Set("Authorization", "Bearer dev-local-key")
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)

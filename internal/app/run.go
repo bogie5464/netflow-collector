@@ -22,6 +22,7 @@ import (
 	"github.com/bogie5464/netflow-collector/internal/flow"
 	"github.com/bogie5464/netflow-collector/internal/obs"
 	"github.com/bogie5464/netflow-collector/internal/pipeline"
+	"github.com/bogie5464/netflow-collector/internal/sink/clickhouse"
 	"github.com/bogie5464/netflow-collector/internal/sink/mariadb"
 	"github.com/bogie5464/netflow-collector/internal/sink/postgres"
 	"github.com/bogie5464/netflow-collector/internal/source/kafka"
@@ -80,7 +81,7 @@ func CheckNames(cfg config.Config) error {
 	}
 	for _, s := range cfg.Sinks {
 		switch s {
-		case config.SinkPostgres, config.SinkMariaDB:
+		case config.SinkPostgres, config.SinkMariaDB, config.SinkClickHouse:
 		default:
 			return fmt.Errorf("%w: NFC_SINKS: backend %q is not implemented by this binary", ErrConfig, s)
 		}
@@ -166,6 +167,8 @@ func newBackend(ctx context.Context, name string, cfg config.Config) (flow.Backe
 		return postgres.New(ctx, cfg.PostgresDSN, cfg.RetentionDays)
 	case config.SinkMariaDB:
 		return mariadb.New(ctx, cfg.MariaDBDSN, cfg.RetentionDays)
+	case config.SinkClickHouse:
+		return clickhouse.New(ctx, cfg.ClickHouseDSN, cfg.RetentionDays)
 	default:
 		return nil, fmt.Errorf("%w: unknown backend %q", ErrConfig, name)
 	}

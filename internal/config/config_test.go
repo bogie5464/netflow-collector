@@ -146,7 +146,7 @@ func TestValidation(t *testing.T) {
 		wantMsg string
 	}{
 		{"rejects an unknown sink and names NFC_SINKS",
-			append(baseline(), "NFC_SINKS=nope"), "NFC_SINKS", "must be one of postgres, mariadb"},
+			append(baseline(), "NFC_SINKS=nope"), "NFC_SINKS", "must be one of postgres, mariadb, clickhouse"},
 		{"rejects an unknown source",
 			append(baseline(), "NFC_SOURCES=netflow,carrier-pigeon"), "NFC_SOURCES", "must be one of netflow, kafka"},
 		{"requires the postgres DSN only when postgres is enabled",

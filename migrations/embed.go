@@ -12,7 +12,7 @@ import (
 
 // FS holds <backend>/<NNNNN>_<name>.sql for every backend.
 //
-//go:embed postgres mariadb
+//go:embed postgres mariadb clickhouse
 var FS embed.FS
 
 // Lock serialises Migrate calls. goose's base FS and dialect are process-wide

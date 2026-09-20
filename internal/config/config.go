@@ -23,10 +23,11 @@ import (
 
 // Known values for NFC_SOURCES and NFC_SINKS.
 const (
-	SourceNetFlow = "netflow"
-	SourceKafka   = "kafka"
-	SinkPostgres  = "postgres"
-	SinkMariaDB   = "mariadb"
+	SourceNetFlow  = "netflow"
+	SourceKafka    = "kafka"
+	SinkPostgres   = "postgres"
+	SinkMariaDB    = "mariadb"
+	SinkClickHouse = "clickhouse"
 )
 
 // maxWalkUp bounds the search for .env so a misplaced working directory cannot
@@ -43,10 +44,11 @@ type Config struct {
 	NetFlowAddr string `env:"NFC_NETFLOW_ADDR" validate:"omitempty,hostname_port"`
 
 	Sources []string `env:"NFC_SOURCES" validate:"dive,oneof=netflow kafka"`
-	Sinks   []string `env:"NFC_SINKS" validate:"dive,oneof=postgres mariadb"`
+	Sinks   []string `env:"NFC_SINKS" validate:"dive,oneof=postgres mariadb clickhouse"`
 
 	PostgresDSN   string `env:"NFC_POSTGRES_DSN" validate:"required_if=PostgresEnabled true"`
 	MariaDBDSN    string `env:"NFC_MARIADB_DSN" validate:"required_if=MariaDBEnabled true"`
+	ClickHouseDSN string `env:"NFC_CLICKHOUSE_DSN" validate:"required_if=ClickHouseEnabled true"`
 	RetentionDays int    `env:"NFC_RETENTION_DAYS" envDefault:"30" validate:"min=1"`
 
 	KafkaBrokers []string `env:"NFC_KAFKA_BROKERS" validate:"required_if=KafkaEnabled true,dive,hostname_port"`
@@ -63,10 +65,11 @@ type Config struct {
 
 	// Derived from Sources and Sinks before validation so the conditional
 	// rules above can be plain required_if tags. Not read from the environment.
-	PostgresEnabled bool `env:"-"`
-	MariaDBEnabled  bool `env:"-"`
-	KafkaEnabled    bool `env:"-"`
-	NetFlowEnabled  bool `env:"-"`
+	PostgresEnabled   bool `env:"-"`
+	MariaDBEnabled    bool `env:"-"`
+	ClickHouseEnabled bool `env:"-"`
+	KafkaEnabled      bool `env:"-"`
+	NetFlowEnabled    bool `env:"-"`
 }
 
 // VarError reports one invalid variable. Var is the NFC_* name so the message
@@ -120,6 +123,7 @@ func parse(vars map[string]string) (*Config, error) {
 	}
 	cfg.PostgresEnabled = slices.Contains(cfg.Sinks, SinkPostgres)
 	cfg.MariaDBEnabled = slices.Contains(cfg.Sinks, SinkMariaDB)
+	cfg.ClickHouseEnabled = slices.Contains(cfg.Sinks, SinkClickHouse)
 	cfg.KafkaEnabled = slices.Contains(cfg.Sources, SourceKafka)
 	cfg.NetFlowEnabled = slices.Contains(cfg.Sources, SourceNetFlow)
 

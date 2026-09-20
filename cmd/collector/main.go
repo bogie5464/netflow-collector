@@ -5,11 +5,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 
+	"github.com/bogie5464/netflow-collector/internal/app"
 	"github.com/bogie5464/netflow-collector/internal/config"
 )
 
@@ -56,20 +58,31 @@ func run(args []string) int {
 		return exitError
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return exitConfig
-	}
 	if *validateConfig {
+		cfg, err := config.Load()
+		if err == nil {
+			err = app.CheckNames(*cfg)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return exitConfig
+		}
 		fmt.Printf("configuration ok: sources=%v sinks=%v\n", cfg.Sources, cfg.Sinks)
 		return exitOK
 	}
 
-	// The runtime wiring (internal/app) arrives with the vertical slice.
-	fmt.Fprintln(os.Stderr, "collector: runtime not wired yet; use -validate-config")
-	return exitError
+	err := app.Run(context.Background())
+	switch {
+	case err == nil:
+		return exitOK
+	case errors.Is(err, app.ErrConfig):
+		fmt.Fprintln(os.Stderr, err)
+		return exitConfig
+	case errors.Is(err, app.ErrMigration):
+		fmt.Fprintln(os.Stderr, err)
+		return exitMigration
+	default:
+		fmt.Fprintln(os.Stderr, err)
+		return exitError
+	}
 }
-
-// exitMigration is reserved for internal/app once it owns boot-time migrations.
-var _ = exitMigration

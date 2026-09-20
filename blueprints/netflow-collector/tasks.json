@@ -152,7 +152,7 @@
       "cmd/collector/main.go",
       "internal/app/e2e_udp_postgres_test.go"
     ],
-    "status": "pending"
+    "status": "done"
   },
   {
     "id": "E1-T6",

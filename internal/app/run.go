@@ -1,0 +1,229 @@
+// Package app is the only wiring layer: the one place concrete sources and
+// backends are constructed and connected to the pipeline. Everything below it
+// talks through internal/flow.
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/netip"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/bogie5464/netflow-collector/internal/config"
+	"github.com/bogie5464/netflow-collector/internal/flow"
+	"github.com/bogie5464/netflow-collector/internal/pipeline"
+	"github.com/bogie5464/netflow-collector/internal/sink/postgres"
+	"github.com/bogie5464/netflow-collector/internal/source/netflow"
+)
+
+// Sentinel errors main maps onto the process exit codes: ErrConfig is 2,
+// ErrMigration is 3, anything else is 1.
+var (
+	ErrConfig    = errors.New("invalid configuration")
+	ErrMigration = errors.New("storage boot failed")
+)
+
+// shutdownTimeout bounds the flush after cancellation; a hung backend must
+// not keep the process alive past the orchestrator's patience.
+const shutdownTimeout = 10 * time.Second
+
+// Run loads configuration, builds the app and runs it until SIGINT/SIGTERM.
+func Run(ctx context.Context) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrConfig, err)
+	}
+	a, err := New(ctx, *cfg)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signalContext(ctx)
+	defer stop()
+	return a.Run(ctx)
+}
+
+// signalContext cancels ctx on SIGINT or SIGTERM.
+func signalContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+}
+
+// CheckNames rejects a source or sink this binary does not implement. It is
+// pure so -validate-config can run it without touching a database.
+func CheckNames(cfg config.Config) error {
+	for _, s := range cfg.Sinks {
+		if s != config.SinkPostgres {
+			return fmt.Errorf("%w: NFC_SINKS: backend %q is not implemented by this binary", ErrConfig, s)
+		}
+	}
+	for _, s := range cfg.Sources {
+		if s != config.SourceNetFlow {
+			return fmt.Errorf("%w: NFC_SOURCES: source %q is not implemented by this binary", ErrConfig, s)
+		}
+	}
+	return nil
+}
+
+// App is one configured collector. Build it with New, drive it with Run.
+type App struct {
+	cfg      config.Config
+	log      *slog.Logger
+	backends map[string]flow.Backend
+	sources  map[string]flow.Source
+	pipe     *pipeline.Pipeline
+
+	mu        sync.Mutex
+	listening netip.AddrPort
+	ready     chan struct{}
+	readyOnce sync.Once
+}
+
+// New constructs every backend and source named in cfg. A name the binary
+// does not implement is ErrConfig; a backend that cannot be reached is
+// ErrMigration, because it is the boot-time storage failure class.
+func New(ctx context.Context, cfg config.Config) (*App, error) {
+	if err := CheckNames(cfg); err != nil {
+		return nil, err
+	}
+	a := &App{
+		cfg:      cfg,
+		log:      slog.Default().With("component", "app"),
+		backends: map[string]flow.Backend{},
+		sources:  map[string]flow.Source{},
+		ready:    make(chan struct{}),
+	}
+	for _, name := range cfg.Sinks {
+		b, err := postgres.New(ctx, cfg.PostgresDSN, cfg.RetentionDays)
+		if err != nil {
+			a.closeBackends()
+			return nil, fmt.Errorf("%w: %s: %w", ErrMigration, name, err)
+		}
+		a.backends[name] = b
+	}
+	for _, name := range cfg.Sources {
+		src, err := netflow.New(cfg)
+		if err != nil {
+			a.closeBackends()
+			return nil, fmt.Errorf("%w: %s: %w", ErrConfig, name, err)
+		}
+		a.sources[name] = src
+	}
+	sinks := make([]pipeline.Sink, 0, len(a.backends))
+	for name, b := range a.backends {
+		sinks = append(sinks, pipeline.Sink{Name: name, Sink: b})
+	}
+	pipe, err := pipeline.New(pipeline.Options{
+		BufferSize:    cfg.PipelineBuffer,
+		BatchSize:     cfg.BatchSize,
+		BatchInterval: cfg.BatchInterval,
+		Workers:       cfg.Workers,
+	}, sinks...)
+	if err != nil {
+		a.closeBackends()
+		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
+	}
+	a.pipe = pipe
+	return a, nil
+}
+
+// Backend returns a constructed backend by its NFC_SINKS name, for tests and
+// for the API layer.
+func (a *App) Backend(name string) flow.Backend { return a.backends[name] }
+
+// Ready is closed once every listener is bound.
+func (a *App) Ready() <-chan struct{} { return a.ready }
+
+// NetFlowAddr is the bound UDP address, valid after Ready.
+func (a *App) NetFlowAddr() netip.AddrPort {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.listening
+}
+
+// Run migrates every backend before anything listens, then runs the pipeline
+// and the sources until ctx is cancelled. Shutdown order: sources stop, the
+// pipeline drains and flushes, backends close.
+func (a *App) Run(ctx context.Context) error {
+	for name, b := range a.backends {
+		if err := b.Migrate(ctx); err != nil {
+			a.closeBackends()
+			return fmt.Errorf("%w: %s: %w", ErrMigration, name, err)
+		}
+		a.log.Info("migrations applied", "backend", name)
+	}
+
+	pipeCtx, stopPipe := context.WithCancel(context.WithoutCancel(ctx))
+	pipeDone := make(chan error, 1)
+	go func() { pipeDone <- a.pipe.Run(pipeCtx) }()
+
+	srcCtx, stopSources := context.WithCancel(ctx)
+	var (
+		wg     sync.WaitGroup
+		srcErr = make(chan error, len(a.sources))
+	)
+	for name, src := range a.sources {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := a.pipe.RunSource(srcCtx, name, src); err != nil {
+				srcErr <- err
+			}
+		}()
+		a.awaitBound(srcCtx, name, src)
+	}
+	a.readyOnce.Do(func() { close(a.ready) })
+
+	// Wait for cancellation or a source that died on its own.
+	var runErr error
+	select {
+	case <-ctx.Done():
+	case err := <-srcErr:
+		runErr = err
+	}
+	stopSources()
+	wg.Wait()
+
+	stopPipe()
+	select {
+	case <-pipeDone:
+	case <-time.After(shutdownTimeout):
+		a.log.Error("pipeline did not drain in time", "timeout", shutdownTimeout)
+	}
+	a.closeBackends()
+	a.log.Info("collector stopped")
+	return runErr
+}
+
+// awaitBound records the listen address of a source that reports one, so
+// tests and logs can find an ephemeral port. Sources without one are fine.
+func (a *App) awaitBound(ctx context.Context, name string, src flow.Source) {
+	r, ok := src.(interface {
+		Ready() <-chan struct{}
+		LocalAddr() netip.AddrPort
+	})
+	if !ok {
+		return
+	}
+	select {
+	case <-r.Ready():
+		a.mu.Lock()
+		a.listening = r.LocalAddr()
+		a.mu.Unlock()
+		a.log.Info("source listening", "source", name, "addr", r.LocalAddr())
+	case <-ctx.Done():
+	}
+}
+
+func (a *App) closeBackends() {
+	for name, b := range a.backends {
+		if err := b.Close(); err != nil {
+			a.log.Error("close backend failed", "backend", name, "err", err)
+		}
+	}
+	// Prevent a double close from a construction failure followed by Run.
+	a.backends = map[string]flow.Backend{}
+}

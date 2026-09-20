@@ -8,12 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"net/netip"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/bogie5464/netflow-collector/internal/api"
 	"github.com/bogie5464/netflow-collector/internal/config"
 	"github.com/bogie5464/netflow-collector/internal/flow"
 	"github.com/bogie5464/netflow-collector/internal/pipeline"
@@ -84,6 +87,7 @@ type App struct {
 
 	mu        sync.Mutex
 	listening netip.AddrPort
+	httpAddr  netip.AddrPort
 	ready     chan struct{}
 	readyOnce sync.Once
 }
@@ -167,6 +171,17 @@ func (a *App) Backend(name string) flow.Backend { return a.backends[name] }
 // Ready is closed once every listener is bound.
 func (a *App) Ready() <-chan struct{} { return a.ready }
 
+// HTTPAddr is the bound API address, valid after Ready; zero when the API
+// is disabled (empty NFC_HTTP_ADDR).
+func (a *App) HTTPAddr() netip.AddrPort {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.httpAddr
+}
+
+// OpenAPI is the generated API document, for -dump-openapi.
+func OpenAPI() []byte { return api.OpenAPI() }
+
 // NetFlowAddr is the bound UDP address, valid after Ready.
 func (a *App) NetFlowAddr() netip.AddrPort {
 	a.mu.Lock()
@@ -189,6 +204,14 @@ func (a *App) Run(ctx context.Context) error {
 	pipeCtx, stopPipe := context.WithCancel(context.WithoutCancel(ctx))
 	pipeDone := make(chan error, 1)
 	go func() { pipeDone <- a.pipe.Run(pipeCtx) }()
+
+	httpSrv, httpDone, err := a.serveHTTP()
+	if err != nil {
+		stopPipe()
+		<-pipeDone
+		a.closeBackends()
+		return err
+	}
 
 	srcCtx, stopSources := context.WithCancel(ctx)
 	var (
@@ -217,6 +240,15 @@ func (a *App) Run(ctx context.Context) error {
 	stopSources()
 	wg.Wait()
 
+	if httpSrv != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			a.log.Error("http shutdown failed", "err", err)
+		}
+		cancel()
+		<-httpDone
+	}
+
 	stopPipe()
 	select {
 	case <-pipeDone:
@@ -226,6 +258,43 @@ func (a *App) Run(ctx context.Context) error {
 	a.closeBackends()
 	a.log.Info("collector stopped")
 	return runErr
+}
+
+// serveHTTP binds NFC_HTTP_ADDR and serves the API. The querier is the first
+// configured sink; every backend is handed over for readiness checks.
+func (a *App) serveHTTP() (*http.Server, <-chan struct{}, error) {
+	if a.cfg.HTTPAddr == "" {
+		return nil, nil, nil
+	}
+	var querier flow.Querier
+	for _, name := range a.cfg.Sinks {
+		if b, ok := a.backends[name]; ok {
+			querier = b
+			break
+		}
+	}
+	ln, err := net.Listen("tcp", a.cfg.HTTPAddr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: NFC_HTTP_ADDR: listen %s: %w", ErrConfig, a.cfg.HTTPAddr, err)
+	}
+	if ta, ok := ln.Addr().(*net.TCPAddr); ok {
+		a.mu.Lock()
+		a.httpAddr = ta.AddrPort()
+		a.mu.Unlock()
+	}
+	srv := &http.Server{
+		Handler:           api.New(querier, a.backends, a.cfg),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			a.log.Error("http server stopped", "err", err)
+		}
+	}()
+	a.log.Info("api listening", "addr", ln.Addr().String())
+	return srv, done, nil
 }
 
 // awaitBound records the listen address of a source that reports one, so

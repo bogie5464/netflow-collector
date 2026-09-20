@@ -51,8 +51,11 @@ func run(args []string) int {
 		fmt.Printf("netflow-collector %s\n", version)
 		return exitOK
 	case *dumpOpenAPI:
-		fmt.Fprintln(os.Stderr, "collector: -dump-openapi is not available until the REST API is built")
-		return exitError
+		if _, err := os.Stdout.Write(app.OpenAPI()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return exitError
+		}
+		return exitOK
 	case *healthcheck:
 		fmt.Fprintln(os.Stderr, "collector: -healthcheck is not available until the ops endpoints are built")
 		return exitError

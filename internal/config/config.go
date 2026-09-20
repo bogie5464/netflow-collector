@@ -61,9 +61,6 @@ type Config struct {
 	// APIKeys are the bearer keys accepted on /v1. Never log one in full.
 	APIKeys []string `env:"NFC_API_KEYS"`
 
-	OTELEnabled  bool   `env:"NFC_OTEL_ENABLED" envDefault:"false"`
-	OTELEndpoint string `env:"NFC_OTEL_ENDPOINT" validate:"required_if=OTELEnabled true"`
-
 	// Derived from Sources and Sinks before validation so the conditional
 	// rules above can be plain required_if tags. Not read from the environment.
 	PostgresEnabled bool `env:"-"`

@@ -78,7 +78,7 @@ invalid value exits with code 2 and names the variable.
 | `NFC_API_KEYS` | Comma-separated bearer keys for `/v1`. Generate with `openssl rand -hex 32`. Empty while the API is enabled is a boot error, never "no key required" |
 | `NFC_PIPELINE_BUFFER` · `NFC_BATCH_SIZE` · `NFC_BATCH_INTERVAL` · `NFC_WORKERS` | Backpressure and batching (defaults 65536 · 2000 · 1s · 4) |
 | `NFC_RETENTION_DAYS` | Age after which flow records are dropped (default 30) |
-| `NFC_LOG_LEVEL` · `NFC_OTEL_ENABLED` · `NFC_OTEL_ENDPOINT` | Logging level; optional OTLP tracing |
+| `NFC_LOG_LEVEL` | Logging level |
 
 ## Storage backends
 

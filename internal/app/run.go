@@ -51,14 +51,9 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	stopTracing, err := obs.SetupTracing(ctx, cfg.OTELEnabled, cfg.OTELEndpoint)
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrConfig, err)
-	}
 	defer func() {
 		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = stopTracing(flushCtx)
 		_ = stopMetrics(flushCtx)
 	}()
 

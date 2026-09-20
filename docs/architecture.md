@@ -103,8 +103,8 @@ assertion (`api.ExporterLister`), so the contract never widens to make one backe
 
 ## Process lifecycle
 
-Boot: load and validate configuration (exit 2 on failure) → initialise logging, metrics and
-optional tracing → construct backends and run every migration (exit 3 on failure, nothing bound
-yet) → start the pipeline → bind the API and the sources. Shutdown on SIGINT/SIGTERM: sources stop,
+Boot: load and validate configuration (exit 2 on failure) → initialise logging and metrics →
+construct backends and run every migration (exit 3 on failure, nothing bound yet) → start the
+pipeline → bind the API and the sources. Shutdown on SIGINT/SIGTERM: sources stop,
 the API drains, the pipeline drains its buffer and flushes the partial batch to every sink, backends
 close, exit 0. The whole sequence is bounded by a 10 s shutdown budget.

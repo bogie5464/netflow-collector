@@ -51,15 +51,15 @@ func unwrapAll(err error) []error {
 
 func TestParseDotEnv(t *testing.T) {
 	t.Run("skips blanks and comments, strips export and quotes", func(t *testing.T) {
-		in := "\n# comment\nNFC_LOG_LEVEL=debug\nexport NFC_WORKERS = 8\nNFC_KAFKA_TOPIC=\"flows\"\nNFC_KAFKA_GROUP='g'\nNFC_OTEL_ENDPOINT=\n"
+		in := "\n# comment\nNFC_LOG_LEVEL=debug\nexport NFC_WORKERS = 8\nNFC_KAFKA_TOPIC=\"flows\"\nNFC_KAFKA_GROUP='g'\nNFC_MARIADB_DSN=\n"
 		vars, err := parseDotEnv(strings.NewReader(in))
 		require.NoError(t, err)
 		require.Equal(t, map[string]string{
-			"NFC_LOG_LEVEL":     "debug",
-			"NFC_WORKERS":       "8",
-			"NFC_KAFKA_TOPIC":   "flows",
-			"NFC_KAFKA_GROUP":   "g",
-			"NFC_OTEL_ENDPOINT": "",
+			"NFC_LOG_LEVEL":   "debug",
+			"NFC_WORKERS":     "8",
+			"NFC_KAFKA_TOPIC": "flows",
+			"NFC_KAFKA_GROUP": "g",
+			"NFC_MARIADB_DSN": "",
 		}, vars)
 	})
 	t.Run("rejects a line without an equals sign", func(t *testing.T) {
@@ -135,7 +135,6 @@ func TestDefaults(t *testing.T) {
 	require.Equal(t, 2000, cfg.BatchSize)
 	require.Equal(t, time.Second, cfg.BatchInterval)
 	require.Equal(t, 4, cfg.Workers)
-	require.False(t, cfg.OTELEnabled)
 	require.Empty(t, cfg.APIKeys)
 }
 
@@ -156,8 +155,6 @@ func TestValidation(t *testing.T) {
 			append(baseline(), "NFC_SINKS=postgres,mariadb"), "NFC_MARIADB_DSN", "must be set"},
 		{"requires kafka brokers when kafka is enabled",
 			append(baseline(), "NFC_SOURCES=kafka", "NFC_KAFKA_TOPIC=flows", "NFC_KAFKA_GROUP=g"), "NFC_KAFKA_BROKERS", "must be set"},
-		{"requires the OTLP endpoint when tracing is on",
-			append(baseline(), "NFC_OTEL_ENABLED=true"), "NFC_OTEL_ENDPOINT", "must be set"},
 		{"rejects an unknown log level",
 			append(baseline(), "NFC_LOG_LEVEL=loud"), "NFC_LOG_LEVEL", "must be one of"},
 		{"rejects a zero worker count",

@@ -7,11 +7,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
@@ -38,25 +36,6 @@ func SetupMetrics() (Shutdown, error) {
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(exporter), sdkmetric.WithResource(res()))
 	otel.SetMeterProvider(mp)
 	return mp.Shutdown, nil
-}
-
-// SetupTracing installs an OTLP/HTTP tracer provider when enabled. When
-// disabled it installs nothing and returns a no-op Shutdown, and nothing in
-// the process attempts an OTLP connection.
-func SetupTracing(ctx context.Context, enabled bool, endpoint string) (Shutdown, error) {
-	if !enabled {
-		return func(context.Context) error { return nil }, nil
-	}
-	if endpoint == "" {
-		return nil, errors.New("obs: NFC_OTEL_ENDPOINT must be set when NFC_OTEL_ENABLED=true")
-	}
-	exporter, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(endpoint))
-	if err != nil {
-		return nil, fmt.Errorf("obs: otlp exporter: %w", err)
-	}
-	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter), sdktrace.WithResource(res()))
-	otel.SetTracerProvider(tp)
-	return tp.Shutdown, nil
 }
 
 func res() *resource.Resource {

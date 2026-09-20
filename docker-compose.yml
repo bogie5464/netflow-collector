@@ -97,7 +97,6 @@ services:
       NFC_BATCH_INTERVAL: "1s"
       NFC_WORKERS: "4"
       NFC_API_KEYS: "dev-local-key"
-      NFC_OTEL_ENABLED: "false"
     ports:
       - "127.0.0.1:8080:8080"
       - "127.0.0.1:2055:2055/udp"

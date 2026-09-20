@@ -114,7 +114,7 @@ shell. `.env.example` is committed and stays in sync; `.env` is not.
 | `NFC_API_KEYS` | if the API is enabled | `internal/api/auth.go` | `openssl rand -hex 32` |
 | `NFC_HTTP_ADDR` `NFC_NETFLOW_ADDR` | yes | `internal/app/run.go` | `.env.example` |
 | `NFC_PIPELINE_BUFFER` `NFC_BATCH_SIZE` `NFC_BATCH_INTERVAL` `NFC_WORKERS` | yes (defaulted) | `internal/pipeline` | `.env.example` |
-| `NFC_RETENTION_DAYS` `NFC_LOG_LEVEL` `NFC_OTEL_ENABLED` `NFC_OTEL_ENDPOINT` | yes (defaulted) | sinks, obs | `.env.example` |
+| `NFC_RETENTION_DAYS` `NFC_LOG_LEVEL` | yes (defaulted) | sinks, obs | `.env.example` |
 
 ## Rules
 

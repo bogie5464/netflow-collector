@@ -20,7 +20,7 @@ checking itself with `-healthcheck`, which GETs `/healthz` on the `NFC_HTTP_ADDR
 that produced it. `.dockerignore` keeps `blueprints/`, `bin/`, `.git/` and `.env` out of the build
 context; the image never contains a credential.
 
-CI (`.github/workflows/ci.yml`) asserts the image stays under 20 MB, which is what proves the
+CI (`.github/workflows/ci.yml`) asserts the image stays under 30 MB, which is what proves the
 distroless base and the static build actually held.
 
 ## Running the stack with Compose

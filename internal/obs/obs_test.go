@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,13 +69,10 @@ func TestLogLevelIsHonoured(t *testing.T) {
 	require.Equal(t, slog.LevelInfo, obs.ParseLevel("nonsense"), "unknown levels mean info")
 }
 
-func TestMetricsAreServedWithoutOTLP(t *testing.T) {
+func TestMetricsAreServed(t *testing.T) {
 	stop, err := obs.SetupMetrics()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = stop(context.Background()) })
-	stopTracing, err := obs.SetupTracing(context.Background(), false, "")
-	require.NoError(t, err)
-	require.NoError(t, stopTracing(context.Background()))
 
 	obs.Prime([]string{"netflow"}, []string{"postgres"})
 	rr := httptest.NewRecorder()
@@ -97,31 +93,6 @@ func TestMetricsAreServedWithoutOTLP(t *testing.T) {
 	stop2, err := obs.SetupMetrics()
 	require.NoError(t, err)
 	_ = stop2(context.Background())
-}
-
-func TestTracingDisabledMakesNoConnection(t *testing.T) {
-	// A listener that fails the test if anything connects.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer func() { _ = ln.Close() }()
-	connected := make(chan struct{}, 1)
-	go func() {
-		if c, err := ln.Accept(); err == nil {
-			connected <- struct{}{}
-			_ = c.Close()
-		}
-	}()
-	stop, err := obs.SetupTracing(context.Background(), false, "http://"+ln.Addr().String())
-	require.NoError(t, err)
-	require.NoError(t, stop(context.Background()))
-	select {
-	case <-connected:
-		t.Fatal("tracing disabled but something connected to the OTLP endpoint")
-	case <-time.After(300 * time.Millisecond):
-	}
-
-	_, err = obs.SetupTracing(context.Background(), true, "")
-	require.ErrorContains(t, err, "NFC_OTEL_ENDPOINT")
 }
 
 func TestRedactedKeyMatching(t *testing.T) {

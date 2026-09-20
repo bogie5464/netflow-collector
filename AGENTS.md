@@ -33,4 +33,4 @@ any task is marked done.
 6. Never mark a task done with a failing gate command, and never edit a `Verify` command to pass.
 
 Full architecture, import boundaries, code rules and the environment table: see `CLAUDE.md` in this
-directory. Build order: `blueprints/netflow-collector/tasks.json` and `epics/`.
+directory. Build order: `blueprints/netflow-collector/tasks.json` and `epics/` (local, gitignored).

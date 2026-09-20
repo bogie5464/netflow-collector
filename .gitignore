@@ -17,6 +17,9 @@
 .idea/
 .vscode/
 
-# NOT ignored, deliberately: blueprints/ (the design bundle is committed and /architect-next
-# reads tasks.json from it), .claude/, .golangci.yml, docker-compose.yml, Dockerfile,
+# The Architect design bundle. Kept locally for /architect-next and /architect-audit, not
+# published: the build it describes is complete.
+/blueprints/
+
+# NOT ignored, deliberately: .claude/, .golangci.yml, docker-compose.yml, Dockerfile,
 # .dockerignore, .github/, docs/openapi.json, go.mod, go.sum.

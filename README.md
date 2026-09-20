@@ -109,5 +109,5 @@ go build ./... && go test -race ./...
 
 ## License
 
-See `LICENSE` if present in your distribution; the upstream design bundle lives in
-`blueprints/netflow-collector/` and is committed on purpose so the build can be resumed.
+See `LICENSE` if present in your distribution. The Architect design bundle this project was built
+from (`blueprints/netflow-collector/`) is kept out of the repository; it is a local design artefact.

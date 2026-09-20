@@ -99,7 +99,7 @@ assertion (`api.ExporterLister`), so the contract never widens to make one backe
 | Logging and redaction | `internal/obs/logging.go` |
 | API envelope and parameters | `internal/api/server.go`, `internal/api/flows.go` → `docs/openapi.json` |
 | Image tags, ports, credentials | `docker-compose.yml` |
-| Build order and resumable state | `blueprints/netflow-collector/tasks.json` |
+| Build order and resumable state | `blueprints/netflow-collector/tasks.json` — local design bundle, not tracked |
 
 ## Process lifecycle
 

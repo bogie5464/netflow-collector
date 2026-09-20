@@ -124,7 +124,8 @@ Deferred conventions — read the matching file before editing that area:
 | `.claude/rules/api.md` | `internal/api/**` |
 | `.claude/rules/testing.md` | `**/*_test.go`, `internal/sink/sinktest/**` |
 
-Build order and resumable state: `blueprints/netflow-collector/tasks.json` and `epics/`.
+Build order and resumable state: `blueprints/netflow-collector/tasks.json` and `epics/` (a local,
+gitignored design bundle; the build it describes is complete).
 
 ## Non-negotiable
 

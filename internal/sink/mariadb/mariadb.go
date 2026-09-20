@@ -157,16 +157,16 @@ func (b *backend) WriteBatch(ctx context.Context, records []flow.FlowRecord) err
 	if len(records) == 0 {
 		return nil
 	}
+	ids, err := b.resolveExporters(ctx, records)
+	if err != nil {
+		return err
+	}
 	tx, err := b.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("mariadb: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	ids, newlyResolved, err := b.resolveExporters(ctx, tx, records)
-	if err != nil {
-		return err
-	}
 	for start := 0; start < len(records); start += insertRows {
 		end := min(start+insertRows, len(records))
 		sqlText, args := insertStatement(records[start:end], ids)
@@ -177,22 +177,18 @@ func (b *backend) WriteBatch(ctx context.Context, records []flow.FlowRecord) err
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("mariadb: commit: %w", err)
 	}
-	// Only publish newly resolved ids to the shared cache after a durable
-	// commit. Caching them earlier lets a transaction that later rolls back
-	// (e.g. a deadlock racing another worker's insert for the same
-	// brand-new exporter) poison the cache with an id that no longer
-	// exists, which then fails every subsequent batch's foreign key with no
-	// way to self-heal.
-	for addr, id := range newlyResolved {
-		b.remember(addr, id)
-	}
 	return nil
 }
 
-// resolveExporters maps every distinct ExporterAddr in the batch to its id.
-// newlyResolved holds only the ids this call inserted for the first time;
-// the caller must not cache them until its transaction commits.
-func (b *backend) resolveExporters(ctx context.Context, tx *sql.Tx, records []flow.FlowRecord) (ids, newlyResolved map[netip.Addr]int64, err error) {
+// resolveExporters maps every distinct ExporterAddr in the batch to its id,
+// creating the row on first sight and advancing last_seen_at once per batch
+// per exporter — never once per record.
+//
+// Each statement autocommits on its own, deliberately outside the record
+// insert transaction. Touching the exporter row inside it held the row lock
+// until commit, which serialised every worker writing for the same exporter
+// and deadlocked them against each other under load.
+func (b *backend) resolveExporters(ctx context.Context, records []flow.FlowRecord) (map[netip.Addr]int64, error) {
 	seen := map[netip.Addr]time.Time{}
 	for i := range records {
 		r := &records[i]
@@ -200,33 +196,32 @@ func (b *backend) resolveExporters(ctx context.Context, tx *sql.Tx, records []fl
 			seen[r.ExporterAddr] = micro(r.ReceivedAt)
 		}
 	}
-	ids = make(map[netip.Addr]int64, len(seen))
-	newlyResolved = map[netip.Addr]int64{}
+	ids := make(map[netip.Addr]int64, len(seen))
 	for addr, last := range seen {
 		id, ok := b.cached(addr)
 		if ok {
-			if _, err := tx.ExecContext(ctx,
+			if _, err := b.db.ExecContext(ctx,
 				`UPDATE exporters SET last_seen_at = ? WHERE id = ? AND last_seen_at < ?`, last, id, last); err != nil {
-				return nil, nil, fmt.Errorf("mariadb: touch exporter %s: %w", addr, err)
+				return nil, fmt.Errorf("mariadb: touch exporter %s: %w", addr, err)
 			}
 		} else {
 			// LAST_INSERT_ID(id) makes the update path report the existing id.
-			res, err := tx.ExecContext(ctx, `
+			res, err := b.db.ExecContext(ctx, `
 				INSERT INTO exporters (ip_address, first_seen_at, last_seen_at) VALUES (?, ?, ?)
 				ON DUPLICATE KEY UPDATE
 				    last_seen_at = GREATEST(last_seen_at, VALUES(last_seen_at)),
 				    id = LAST_INSERT_ID(id)`, addr.AsSlice(), last, last)
 			if err != nil {
-				return nil, nil, fmt.Errorf("mariadb: upsert exporter %s: %w", addr, err)
+				return nil, fmt.Errorf("mariadb: upsert exporter %s: %w", addr, err)
 			}
 			if id, err = res.LastInsertId(); err != nil {
-				return nil, nil, fmt.Errorf("mariadb: exporter id %s: %w", addr, err)
+				return nil, fmt.Errorf("mariadb: exporter id %s: %w", addr, err)
 			}
-			newlyResolved[addr] = id
+			b.remember(addr, id)
 		}
 		ids[addr] = id
 	}
-	return ids, newlyResolved, nil
+	return ids, nil
 }
 
 func (b *backend) cached(addr netip.Addr) (int64, bool) {

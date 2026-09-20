@@ -67,34 +67,48 @@ pipeline settings (65,536-record buffer, 2,000-record batches, 1s batch interval
 
 | Metric | Value |
 |---|---|
-| Send rate offered | ~259,000 datagrams/s (~18.6 MB/s) |
-| Records durably ingested (committed to Postgres) | ~18,354 records/s (~1.3 MB/s) |
-| Dropped (pipeline buffer full) | ~2.3M of ~2.6M sent |
-| Batch write errors | A handful, all in the first ~2s (see below), zero afterward |
+| Send rate offered | ~200,000–260,000 datagrams/s (~15–19 MB/s; the sender shares the CPU with the collector and the database) |
+| Records durably ingested (committed to Postgres) | **~43,000 records/s (~3.1 MB/s)** |
+| Mean `WriteBatch` latency, 2,000-row batch, 4 workers | ~205 ms |
+| Dropped (pipeline buffer full) | ~1.5M of ~2.0M sent |
+| Batch write errors | 0 |
 
 The gap between "offered" and "ingested" is the real finding: **on this machine, Postgres write
 throughput — not the pipeline, not decode, not the kernel UDP path — is the ceiling.** A single
 exporter flooding at line rate saturates the pipeline buffer almost immediately because each
-2,000-record batch costs one round-trip transaction (exporter upsert/touch, then a bulk insert,
-then commit) to the database. Four workers doing that sequentially caps out around 18K records/s
-on this hardware; a slower or busier database would cap out lower, a faster one higher. This is
-exactly what `docs/runbook.md`'s "a sink is falling behind" playbook (widen `NFC_WORKERS`, tune
-batch size, add a second Postgres/MariaDB sink, or move to bigger iron) exists for.
+2,000-record batch is one round trip to the database. A slower or busier database caps out lower,
+a faster one higher. This is exactly what `docs/runbook.md`'s "a sink is falling behind" playbook
+(widen `NFC_WORKERS`, tune batch size, add a second sink, or move to bigger iron) exists for.
 
-**A concurrency bug this test found and fixed.** The first run of this test surfaced a handful of
-`deadlock detected (SQLSTATE 40P01)` errors from Postgres — expected, since many workers race to
-insert the *same brand-new* exporter row concurrently and Postgres's deadlock detector breaks the
-tie by aborting one side. The bug was that the losing transaction's exporter id had already been
-published to the in-process exporter cache *before* its transaction committed, so a rolled-back
-insert poisoned the cache with an id that never durably existed — every subsequent batch then
-failed its foreign key check, forever, with no way to self-heal. Both `internal/sink/postgres` and
-`internal/sink/mariadb` now defer publishing a newly-resolved exporter id to the cache until after
-`Commit` succeeds. Post-fix, the same race still produces a handful of deadlocks at the very first
-moment a new exporter is seen (a real, bounded, self-resolving Postgres phenomenon — the losing
-side simply retries fresh on its next batch), but it no longer cascades: errors stop appearing
-within ~2 seconds and the rest of the run proceeds cleanly. In production this only matters the
-instant a brand-new exporter starts sending, which is rare compared to this adversarial single-
-exporter flood.
+**How `NFC_WORKERS` behaves against this database:**
+
+| Workers | Mean batch latency | Ingested | Write errors |
+|---|---|---|---|
+| 1 | 151 ms | ~19,000 records/s | 0 |
+| 4 (default) | 205 ms | ~43,000 records/s | 0 |
+| 8 | 448 ms | ~41,000 records/s | 0 |
+
+Four workers is the knee on this hardware: latency per batch rises a little because the inserts
+genuinely run concurrently, and total throughput more than doubles. Eight workers just queue on the
+same database — latency doubles and throughput does not move. Re-measure on your database before
+raising the default; the knee is a property of the database, not the collector.
+
+**What this test found and fixed.** The first run measured only ~18,000 records/s with 4 workers —
+no better than 1 worker — and logged a handful of `deadlock detected (SQLSTATE 40P01)` errors.
+Both symptoms had one cause: each batch's transaction first touched (or inserted) the exporter row
+to advance `last_seen_at`, and then held that row lock until the batch committed. With every
+worker writing for the same exporter, the workers were serialised on that lock, and two of them
+occasionally took the exporter lock and the flow-record unique index in opposite orders, which
+Postgres's deadlock detector resolved by aborting one. The exporter resolution now runs as
+autocommit statements *before* the record insert, in both `internal/sink/postgres` and
+`internal/sink/mariadb`. The row lock lasts one statement instead of one batch, the deadlock cycle
+no longer exists, and `last_seen_at` is still advanced at most once per batch per exporter. The
+same run went from ~18,000 to ~43,000 records/s with zero write errors.
+
+An earlier, narrower fix — not publishing a brand-new exporter's id to the in-process cache until
+its transaction had committed, so a rolled-back insert could not poison the cache — is subsumed by
+this one: an autocommitted upsert is durable by the time it returns, so its id is safe to cache
+immediately.
 
 Numbers here are single-exporter, loopback, one dev machine running the collector and the
 TimescaleDB container side by side — they are a methodology and a rough order of magnitude, not a

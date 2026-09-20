@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
@@ -94,13 +93,7 @@ func (b *backend) WriteBatch(ctx context.Context, records []flow.FlowRecord) err
 	if len(records) == 0 {
 		return nil
 	}
-	tx, err := b.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("postgres: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	ids, newlyResolved, err := b.resolveExporters(ctx, tx, records)
+	ids, err := b.resolveExporters(ctx, records)
 	if err != nil {
 		return err
 	}
@@ -108,31 +101,21 @@ func (b *backend) WriteBatch(ctx context.Context, records []flow.FlowRecord) err
 	for i := range records {
 		cols.add(&records[i], ids[records[i].ExporterAddr])
 	}
-	_, err = tx.Exec(ctx, insertSQL, cols.args()...)
-	if err != nil {
+	if _, err := b.pool.Exec(ctx, insertSQL, cols.args()...); err != nil {
 		return fmt.Errorf("postgres: insert %d records: %w", len(records), err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("postgres: commit: %w", err)
-	}
-	// Only publish newly resolved ids to the shared cache after a durable
-	// commit. Caching them earlier lets a transaction that later rolls back
-	// (e.g. a deadlock racing another worker's insert for the same
-	// brand-new exporter) poison the cache with an id that no longer
-	// exists, which then fails every subsequent batch's foreign key with no
-	// way to self-heal.
-	for addr, id := range newlyResolved {
-		b.remember(addr, id)
 	}
 	return nil
 }
 
 // resolveExporters maps every distinct ExporterAddr in the batch to its id,
 // creating the row on first sight and advancing last_seen_at once per batch
-// per exporter — never once per record. newlyResolved holds only the ids
-// this call inserted for the first time; the caller must not cache them
-// until its transaction commits.
-func (b *backend) resolveExporters(ctx context.Context, tx pgx.Tx, records []flow.FlowRecord) (ids, newlyResolved map[netip.Addr]int64, err error) {
+// per exporter — never once per record.
+//
+// Each statement autocommits on its own, deliberately outside the record
+// insert. Touching the exporter row inside the insert transaction held its
+// row lock until commit, which serialised every worker writing for the same
+// exporter and deadlocked them against each other under load.
+func (b *backend) resolveExporters(ctx context.Context, records []flow.FlowRecord) (map[netip.Addr]int64, error) {
 	seen := map[netip.Addr]time.Time{}
 	for i := range records {
 		r := &records[i]
@@ -140,29 +123,28 @@ func (b *backend) resolveExporters(ctx context.Context, tx pgx.Tx, records []flo
 			seen[r.ExporterAddr] = r.ReceivedAt.UTC().Truncate(time.Microsecond)
 		}
 	}
-	ids = make(map[netip.Addr]int64, len(seen))
-	newlyResolved = map[netip.Addr]int64{}
+	ids := make(map[netip.Addr]int64, len(seen))
 	for addr, last := range seen {
 		id, ok := b.cached(addr)
 		if ok {
-			if _, err := tx.Exec(ctx,
+			if _, err := b.pool.Exec(ctx,
 				`UPDATE exporters SET last_seen_at = $2 WHERE id = $1 AND last_seen_at < $2`, id, last); err != nil {
-				return nil, nil, fmt.Errorf("postgres: touch exporter %s: %w", addr, err)
+				return nil, fmt.Errorf("postgres: touch exporter %s: %w", addr, err)
 			}
 		} else {
-			err := tx.QueryRow(ctx, `
+			err := b.pool.QueryRow(ctx, `
 				INSERT INTO exporters (ip_address, first_seen_at, last_seen_at) VALUES ($1, $2, $2)
 				ON CONFLICT (ip_address) DO UPDATE
 				   SET last_seen_at = GREATEST(exporters.last_seen_at, EXCLUDED.last_seen_at)
 				RETURNING id`, addr, last).Scan(&id)
 			if err != nil {
-				return nil, nil, fmt.Errorf("postgres: upsert exporter %s: %w", addr, err)
+				return nil, fmt.Errorf("postgres: upsert exporter %s: %w", addr, err)
 			}
-			newlyResolved[addr] = id
+			b.remember(addr, id)
 		}
 		ids[addr] = id
 	}
-	return ids, newlyResolved, nil
+	return ids, nil
 }
 
 func (b *backend) cached(addr netip.Addr) (int64, bool) {

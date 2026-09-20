@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bogie5464/netflow-collector/internal/obs"
@@ -57,6 +59,7 @@ func TestEndToEndUDPThroughput(t *testing.T) {
 	droppedBefore := testutil.ToFloat64(obs.RecordsDropped.WithLabelValues(obs.DropBufferFull))
 	decodeErrBefore := testutil.ToFloat64(obs.DecodeErrors.WithLabelValues("netflow"))
 	writeErrBefore := testutil.ToFloat64(obs.BatchWriteErrors.WithLabelValues("postgres"))
+	writeSumBefore, writeCountBefore := histogram(t, obs.BatchWriteDuration.WithLabelValues("postgres"))
 
 	var sent int64
 	start := time.Now()
@@ -76,12 +79,19 @@ func TestEndToEndUDPThroughput(t *testing.T) {
 	droppedAfter := testutil.ToFloat64(obs.RecordsDropped.WithLabelValues(obs.DropBufferFull))
 	decodeErrAfter := testutil.ToFloat64(obs.DecodeErrors.WithLabelValues("netflow"))
 	writeErrAfter := testutil.ToFloat64(obs.BatchWriteErrors.WithLabelValues("postgres"))
+	writeSumAfter, writeCountAfter := histogram(t, obs.BatchWriteDuration.WithLabelValues("postgres"))
 
 	ingested := ingestedAfter - ingestedBefore
 	dropped := droppedAfter - droppedBefore
 	decodeErrs := decodeErrAfter - decodeErrBefore
 	writeErrs := writeErrAfter - writeErrBefore
+	writeCount := writeCountAfter - writeCountBefore
+	writeSum := writeSumAfter - writeSumBefore
 	bytesSent := sent * int64(datagramSize)
+	if writeCount > 0 {
+		t.Logf("WRITES:   %d WriteBatch calls, %.3fs total => %.1f ms mean per batch, %.0f records/s per worker",
+			writeCount, writeSum, 1000*writeSum/float64(writeCount), float64(cfg.BatchSize)*float64(writeCount)/writeSum)
+	}
 
 	t.Logf("SEND:     %d datagrams (%d bytes) in %s => %.0f datagrams/s, %.0f bytes/s",
 		sent, bytesSent, sendElapsed, float64(sent)/sendElapsed.Seconds(), float64(bytesSent)/sendElapsed.Seconds())
@@ -92,4 +102,11 @@ func TestEndToEndUDPThroughput(t *testing.T) {
 
 	cancel()
 	require.NoError(t, <-done)
+}
+
+func histogram(t *testing.T, o prometheus.Observer) (sum float64, count uint64) {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, o.(prometheus.Metric).Write(&m))
+	return m.GetHistogram().GetSampleSum(), m.GetHistogram().GetSampleCount()
 }

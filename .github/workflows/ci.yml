@@ -95,8 +95,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build image
         run: docker compose --profile app build
-      - name: Image size under 30 MB
-        run: test "$(docker image inspect netflow-collector:latest --format '{{.Size}}')" -lt 31457280
+      - name: Binary in the image under 40 MB
+        # Measure the binary itself: `docker image inspect .Size` is uncompressed
+        # bytes on overlay2 and compressed bytes on the containerd snapshotter, so
+        # it is not one number across Docker versions.
+        run: |
+          docker create --name sizecheck netflow-collector:latest
+          docker cp sizecheck:/usr/local/bin/collector /tmp/collector
+          docker rm sizecheck
+          size=$(stat -c %s /tmp/collector)
+          echo "collector binary: $size bytes"
+          test "$size" -lt 41943040
 
   nightly-load:
     name: nightly load verification

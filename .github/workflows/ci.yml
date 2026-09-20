@@ -3,6 +3,10 @@ name: ci
 on:
   push:
   pull_request:
+  schedule:
+    # nightly load verification: the load tag runs without -race and asserts
+    # the throughput floor and the ingested + dropped == offered invariant.
+    - cron: "0 3 * * *"
 
 permissions:
   contents: read
@@ -60,3 +64,22 @@ jobs:
         run: docker compose --profile app build
       - name: Image size under 20 MB
         run: test "$(docker image inspect "$(docker compose --profile app images -q collector)" --format '{{.Size}}')" -lt 20971520
+
+  nightly-load:
+    name: nightly load verification
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Load test (no -race, by design)
+        run: go test -tags=load -count=1 -v -run TestPipelineLoad ./internal/pipeline/...
+      - name: Whole-tree race gate
+        run: |
+          docker compose up -d --wait redpanda
+          cp .env.example .env
+          go test -race -count=1 ./...
+          docker compose down

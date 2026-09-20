@@ -121,7 +121,7 @@
       "internal/sink/sinktest/conformance.go",
       "internal/sink/postgres/postgres_test.go"
     ],
-    "status": "pending"
+    "status": "done"
   },
   {
     "id": "E1-T5",

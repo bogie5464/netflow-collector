@@ -1,21 +1,59 @@
 # Performance
 
-Two numbers matter: how fast the in-memory pipeline moves records when nothing is in the way,
-and whether every record is accounted for when something is. The first is a floor that catches a
-pathological change; the second is the invariant the whole backpressure design rests on.
+Three layers are measured separately, because each answers a different question:
 
-Both are measured by `internal/pipeline/load_test.go`, behind the `load` build tag, **without**
-`-race` (the detector costs roughly an order of magnitude and would fail the floor on correct code):
+| Layer | What it measures | Measured on the dev machine |
+|---|---|---|
+| **Collector, wire to sink** (`TestEndToEndUDPThroughputStubSink`) | Real UDP socket, real `goflow2` decode, the real pipeline, a sink that only counts | **~242,000 records/s, zero pipeline drops** |
+| Collector + TimescaleDB (`TestEndToEndUDPThroughput`) | The same wire path into a real Postgres/TimescaleDB container | ~56,000 records/s durably committed |
+| Pipeline alone (`TestPipelineLoad*`) | In-memory `Offer` to batch to an instant sink; no socket, no decode | ~4,400,000 records/s |
+
+The first row is the collector's capacity: what this binary can take off the wire and hand to a
+sink on this hardware. The second is what a particular database on the same hardware could absorb
+of it. The third is a floor that catches a pathological change in the pipeline itself and proves
+the `ingested + dropped == offered` invariant; it is not a throughput claim, because nothing in it
+touches a socket or a decoder.
+
+All three are behind the `load` build tag and run **without** `-race` (the detector costs roughly
+an order of magnitude and would fail the floors on correct code):
 
 ```bash
-go test -tags=load -run TestPipelineLoad ./internal/pipeline/...
+go test -tags=load -run TestEndToEndUDPThroughput -v ./internal/app/...   # both end-to-end tests
+go test -tags=load -run TestPipelineLoad ./internal/pipeline/...            # pipeline only
 ```
 
-CI runs it nightly; the whole-tree `go test -race ./...` gate runs on every push.
+CI runs all of them nightly; the whole-tree `go test -race ./...` gate runs on every push.
 
-## Measured throughput
+## What ~242,000 flows/s means for a 10 Gbps link
 
-Measured on 2026-09-19 at tag `step-13-load-verification`, three consecutive runs.
+Flow rate is a property of the traffic mix, not the link speed, so the useful relation is
+arithmetic, not a lookup: 10 Gbps is 1.25 GB/s, and dividing by the average flow size gives the
+unsampled flow rate.
+
+| Average flow size | Unsampled flows/s per 10 Gbps | Collector alone (~242K/s) | Collector + this TimescaleDB (~56K/s) |
+|---|---|---|---|
+| 100 KB (bulk transfers, backups, video) | ~12,500 | ~19 links | ~4 links |
+| 50 KB (typical enterprise / Internet mix) | ~25,000 | ~10 links | ~2 links |
+| 10 KB (chatty, many short sessions) | ~125,000 | ~2 links | 0.4 links |
+| 1 KB (DNS-heavy, scans, DDoS) | ~1,250,000 | sample | sample |
+
+Read it as: one instance of the collector on an 8-CPU box comfortably takes several unsampled
+10 Gbps links of ordinary traffic, and the database — not the collector — decides how many of
+those it will keep. Traffic in the bottom row is why exporters sample; at 1:1000 it becomes
+~1,250 flows/s and is not a capacity question at all.
+
+Two caveats on the measurement side. The test sends one flow record per datagram (72 bytes);
+real exporters pack up to 30 v5 records into a 1,464-byte datagram, so the collector sees far
+fewer packets per record in production than in this test and the ~242,000 figure is conservative
+on the packet path. And the ~6% the collector missed in that run was lost in the kernel's UDP
+receive buffer before the process saw it — `net.core.rmem_max` / `SO_RCVBUF` territory, which the
+test leaves at the distribution default. Measure the real rate on a real link with
+`rate(netflow_records_ingested_total[5m])` before sizing from this table.
+
+## Pipeline-only measurements
+
+Measured on 2026-09-19 at tag `step-13-load-verification`, three consecutive runs, by
+`internal/pipeline/load_test.go`.
 
 **Throughput scenario** — 200,000 synthetic records offered by one producer to a pipeline whose
 sink accepts instantly; wall-clock from the first `Offer` until the sink has received every

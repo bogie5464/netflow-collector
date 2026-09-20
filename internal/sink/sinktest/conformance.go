@@ -163,6 +163,14 @@ func Conformance(t *testing.T, factory Factory) {
 		require.Len(t, all(t, querier, window()), 10)
 	})
 
+	t.Run("a batch mixing new records with redelivered ones stores only the new ones", func(t *testing.T) {
+		sink, querier := factory(t)
+		require.NoError(t, sink.WriteBatch(ctx, batch(10, exporterA, true)))
+		// The first 10 keys of this batch are the redeliveries; the last 10 are new.
+		require.NoError(t, sink.WriteBatch(ctx, batch(20, exporterA, true)))
+		require.Len(t, all(t, querier, window()), 20)
+	})
+
 	t.Run("writing a batch with nil DedupKey twice doubles the row count", func(t *testing.T) {
 		sink, querier := factory(t)
 		recs := batch(10, exporterA, false)

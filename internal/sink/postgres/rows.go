@@ -103,6 +103,26 @@ func (c *columns) args() []any {
 	}
 }
 
+// copyColumns is the COPY target list, in the same order as insertSQL and
+// copySource.
+var copyColumns = []string{
+	"received_at", "exporter_id", "flow_type", "first_switched", "last_switched",
+	"src_addr", "dst_addr", "src_port", "dst_port", "protocol", "tcp_flags",
+	"packets", "bytes", "sampling_rate", "input_iface", "output_iface", "src_as", "dst_as",
+	"next_hop", "dedup_key",
+}
+
+func (c *columns) copySource() pgx.CopyFromSource {
+	return pgx.CopyFromSlice(len(c.receivedAt), func(i int) ([]any, error) {
+		return []any{
+			c.receivedAt[i], c.exporterID[i], c.flowType[i], c.firstSwitched[i], c.lastSwitched[i],
+			c.srcAddr[i], c.dstAddr[i], c.srcPort[i], c.dstPort[i], c.protocol[i], c.tcpFlags[i],
+			c.packets[i], c.bytes[i], c.samplingRate[i], c.inIface[i], c.outIface[i], c.srcAS[i], c.dstAS[i],
+			c.nextHop[i], c.dedupKey[i],
+		}, nil
+	})
+}
+
 // scanRecord reads one selectSQL row. It returns seq separately because seq
 // is a cursor ingredient, not a public field.
 func scanRecord(rows pgx.Rows) (flow.FlowRecord, int64, error) {

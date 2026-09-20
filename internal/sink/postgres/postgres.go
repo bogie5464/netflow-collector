@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
@@ -85,10 +87,17 @@ func (b *backend) Close() error {
 	return nil
 }
 
-// WriteBatch resolves each record's exporter, then inserts every row in one
-// statement with ON CONFLICT DO NOTHING. The nullable unique index on
-// (received_at, dedup_key) does the dedup work; there is no branch on where a
-// record came from.
+// WriteBatch resolves each record's exporter, then COPYs the batch into the
+// hypertable. COPY cannot carry ON CONFLICT DO NOTHING, so if the nullable
+// unique index on (received_at, dedup_key) rejects a row — a redelivered
+// record already stored — the whole COPY is discarded and the batch is
+// retried through the conflict-tolerant insert. The sink still never
+// inspects DedupKey or where a record came from: the database decides which
+// path a batch takes, and the index still does the dedup work.
+//
+// docs/performance.md has the measurement behind this: on the hypertable
+// COPY is ~1.7x the rows per CPU-second of the unnest insert, and a batch
+// with no redelivery (every UDP batch) never pays for the fallback.
 func (b *backend) WriteBatch(ctx context.Context, records []flow.FlowRecord) error {
 	if len(records) == 0 {
 		return nil
@@ -101,10 +110,25 @@ func (b *backend) WriteBatch(ctx context.Context, records []flow.FlowRecord) err
 	for i := range records {
 		cols.add(&records[i], ids[records[i].ExporterAddr])
 	}
+	_, err = b.pool.CopyFrom(ctx, pgx.Identifier{"flow_records"}, copyColumns, cols.copySource())
+	if err == nil {
+		return nil
+	}
+	if !isUniqueViolation(err) {
+		return fmt.Errorf("postgres: copy %d records: %w", len(records), err)
+	}
 	if _, err := b.pool.Exec(ctx, insertSQL, cols.args()...); err != nil {
 		return fmt.Errorf("postgres: insert %d records: %w", len(records), err)
 	}
 	return nil
+}
+
+// uniqueViolation is SQLSTATE 23505.
+const uniqueViolation = "23505"
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolation
 }
 
 // resolveExporters maps every distinct ExporterAddr in the batch to its id,

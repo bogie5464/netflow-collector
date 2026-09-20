@@ -17,6 +17,7 @@ import (
 	"github.com/bogie5464/netflow-collector/internal/config"
 	"github.com/bogie5464/netflow-collector/internal/flow"
 	"github.com/bogie5464/netflow-collector/internal/pipeline"
+	"github.com/bogie5464/netflow-collector/internal/sink/mariadb"
 	"github.com/bogie5464/netflow-collector/internal/sink/postgres"
 	"github.com/bogie5464/netflow-collector/internal/source/netflow"
 )
@@ -56,7 +57,9 @@ func signalContext(ctx context.Context) (context.Context, context.CancelFunc) {
 // pure so -validate-config can run it without touching a database.
 func CheckNames(cfg config.Config) error {
 	for _, s := range cfg.Sinks {
-		if s != config.SinkPostgres {
+		switch s {
+		case config.SinkPostgres, config.SinkMariaDB:
+		default:
 			return fmt.Errorf("%w: NFC_SINKS: backend %q is not implemented by this binary", ErrConfig, s)
 		}
 	}
@@ -97,7 +100,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		ready:    make(chan struct{}),
 	}
 	for _, name := range cfg.Sinks {
-		b, err := postgres.New(ctx, cfg.PostgresDSN, cfg.RetentionDays)
+		b, err := newBackend(ctx, name, cfg)
 		if err != nil {
 			a.closeBackends()
 			return nil, fmt.Errorf("%w: %s: %w", ErrMigration, name, err)
@@ -128,6 +131,18 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	}
 	a.pipe = pipe
 	return a, nil
+}
+
+// newBackend is the sink switch: the one place a backend package is named.
+func newBackend(ctx context.Context, name string, cfg config.Config) (flow.Backend, error) {
+	switch name {
+	case config.SinkPostgres:
+		return postgres.New(ctx, cfg.PostgresDSN, cfg.RetentionDays)
+	case config.SinkMariaDB:
+		return mariadb.New(ctx, cfg.MariaDBDSN, cfg.RetentionDays)
+	default:
+		return nil, fmt.Errorf("%w: unknown backend %q", ErrConfig, name)
+	}
 }
 
 // Backend returns a constructed backend by its NFC_SINKS name, for tests and

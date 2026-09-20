@@ -184,7 +184,7 @@
       "internal/sink/mariadb/mariadb_test.go",
       "internal/app/run.go"
     ],
-    "status": "pending"
+    "status": "done"
   },
   {
     "id": "E1-T7",

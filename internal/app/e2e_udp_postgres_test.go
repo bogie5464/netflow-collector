@@ -152,17 +152,19 @@ func TestVerticalSlice(t *testing.T) {
 }
 
 func TestVerticalSliceUnknownNamesAreConfigErrors(t *testing.T) {
+	// Names config's oneof would reject are used on purpose: this is the
+	// wiring layer's own check, for a backend nothing implements.
 	cfg := testConfig("postgres://unused")
-	cfg.Sinks = []string{"mariadb"}
+	cfg.Sinks = []string{"nosuchdb"}
 	_, err := New(context.Background(), cfg)
 	require.ErrorIs(t, err, ErrConfig)
-	require.ErrorContains(t, err, "mariadb")
+	require.ErrorContains(t, err, "nosuchdb")
 
 	cfg = testConfig("postgres://unused")
-	cfg.Sources = []string{"kafka"}
+	cfg.Sources = []string{"nosuchsource"}
 	_, err = New(context.Background(), cfg)
 	require.ErrorIs(t, err, ErrConfig)
-	require.ErrorContains(t, err, "kafka")
+	require.ErrorContains(t, err, "nosuchsource")
 }
 
 func TestVerticalSliceStorageFailureBindsNothing(t *testing.T) {

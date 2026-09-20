@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -19,6 +22,7 @@ import (
 
 	"github.com/moby/moby/api/types/network"
 
+	"github.com/bogie5464/netflow-collector/internal/api"
 	"github.com/bogie5464/netflow-collector/internal/config"
 	"github.com/bogie5464/netflow-collector/internal/flow"
 	"github.com/bogie5464/netflow-collector/internal/obs"
@@ -188,6 +192,73 @@ func TestVerticalSlice(t *testing.T) {
 	require.NoError(t, pc.Close())
 }
 
+// TestVerticalSliceServesAPI covers the one path internal/api's own tests
+// cannot: the REST API wired through the real App, over a real HTTP
+// listener bound by serveHTTP, rather than a fake Querier and httptest.
+func TestVerticalSliceServesAPI(t *testing.T) {
+	dsn := sinktest.StartTimescale(t)
+	cfg := testConfig(dsn)
+	cfg.HTTPAddr = "127.0.0.1:0"
+	cfg.APIKeys = []string{"test-key"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	a, err := New(ctx, cfg)
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	select {
+	case <-a.Ready():
+	case err := <-done:
+		t.Fatalf("app stopped before listening: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("app did not start listening")
+	}
+
+	addr := a.NetFlowAddr()
+	require.True(t, addr.IsValid())
+	src, dst := netip.MustParseAddr("203.0.113.20"), netip.MustParseAddr("198.51.100.201")
+	conn, err := net.Dial("udp", addr.String())
+	require.NoError(t, err)
+	_, err = conn.Write(v5Datagram(src, dst, 51600, 443, 6, 5, 500))
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+
+	base := "http://" + a.HTTPAddr().String()
+
+	resp, err := http.Get(base + "/v1/flows?start=2026-01-01T00:00:00Z&end=2027-01-01T00:00:00Z")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode, "no API key")
+	require.NoError(t, resp.Body.Close())
+
+	resp, err = http.Get(base + "/healthz")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "/healthz stays public")
+	require.NoError(t, resp.Body.Close())
+
+	require.Eventually(t, func() bool {
+		req, err := http.NewRequest(http.MethodGet, base+"/v1/flows?start=2026-01-01T00:00:00Z&end=2027-01-01T00:00:00Z&limit=10", nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer test-key")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			return false
+		}
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return strings.Contains(string(body), `"src_port":51600`)
+	}, 5*time.Second, 50*time.Millisecond, "record must become queryable through the real HTTP wiring")
+
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("app did not stop")
+	}
+}
+
 func sampleCount(t *testing.T, sink string) uint64 {
 	t.Helper()
 	var m dto.Metric
@@ -284,3 +355,26 @@ func TestVerticalSliceStorageFailureBindsNothing(t *testing.T) {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// TestRunFailsFastOnInvalidConfig covers the one path only the package-level
+// Run exercises: config.Load() reading the real environment, before New is
+// ever reached. Everything else in this file calls New directly with a
+// hand-built config.Config, bypassing Load and its validation entirely.
+func TestRunFailsFastOnInvalidConfig(t *testing.T) {
+	t.Setenv("NFC_SOURCES", "netflow")
+	t.Setenv("NFC_SINKS", "postgres")
+	t.Setenv("NFC_NETFLOW_ADDR", "127.0.0.1:0")
+	t.Setenv("NFC_HTTP_ADDR", "")
+	t.Setenv("NFC_POSTGRES_DSN", "")
+
+	err := Run(context.Background())
+	require.ErrorIs(t, err, ErrConfig)
+	require.ErrorContains(t, err, "NFC_POSTGRES_DSN")
+}
+
+// TestOpenAPI covers the package's own thin wrapper — app.OpenAPI is what
+// cmd/collector's -dump-openapi flag calls, and it was never invoked from
+// any test: only internal/api's own OpenAPI() was.
+func TestOpenAPI(t *testing.T) {
+	require.Equal(t, api.OpenAPI(), OpenAPI())
+}

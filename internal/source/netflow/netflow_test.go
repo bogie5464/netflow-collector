@@ -301,6 +301,25 @@ func TestV9(t *testing.T) {
 	})
 }
 
+func TestNTPToTime(t *testing.T) {
+	// IPFIX's flowStart/EndMicroseconds fields use the 64-bit NTP format:
+	// seconds since 1900-01-01 in the high 32 bits, a binary fraction of a
+	// second in the low 32 bits. 2208988800 is the NTP-to-Unix epoch offset.
+	const ntpEpochOffset = 2208988800
+
+	t.Run("whole second, no fraction", func(t *testing.T) {
+		want := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+		v := uint64(want.Unix()+ntpEpochOffset) << 32
+		require.Equal(t, want, ntpToTime(v))
+	})
+
+	t.Run("quarter-second fraction", func(t *testing.T) {
+		want := time.Date(2026, 9, 19, 12, 0, 0, 250_000_000, time.UTC)
+		v := uint64(want.Unix()+ntpEpochOffset)<<32 | uint64(1<<30) // 0.25 * 2^32
+		require.Equal(t, want, ntpToTime(v))
+	})
+}
+
 func TestDecodeRejectsUnknownVersion(t *testing.T) {
 	d := newDecoder()
 	_, err := d.decode([]byte{0, 1, 0, 0}, netip.MustParseAddr("10.0.0.1"), time.Now())

@@ -5,7 +5,8 @@ on:
   pull_request:
   schedule:
     # nightly load verification: the load tag runs without -race and asserts
-    # the throughput floor and the ingested + dropped == offered invariant.
+    # the throughput floor and the ingested + dropped == offered invariant,
+    # plus a real UDP-to-Postgres throughput measurement (docs/performance.md).
     - cron: "0 3 * * *"
 
 permissions:
@@ -109,6 +110,8 @@ jobs:
           cache: true
       - name: Load test (no -race, by design)
         run: go test -tags=load -count=1 -v -run TestPipelineLoad ./internal/pipeline/...
+      - name: End-to-end throughput (UDP -> decode -> Postgres, no -race)
+        run: go test -tags=load -count=1 -v -timeout 5m -run TestEndToEndUDPThroughput ./internal/app/...
       - name: Whole-tree race gate
         run: |
           docker compose up -d --wait redpanda

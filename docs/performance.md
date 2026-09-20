@@ -63,22 +63,74 @@ go test -tags=load -run TestEndToEndUDPThroughput -v ./internal/app/...
 
 **Scenario:** one exporter, one v5 datagram per packet (24-byte header + one 48-byte flow record =
 72 bytes), sent back-to-back over loopback for a fixed 10-second window at the shipped-default
-pipeline settings (65,536-record buffer, 2,000-record batches, 1s batch interval, 4 workers).
+pipeline settings (65,536-record buffer, 2,000-record batches, 1s batch interval, 4 workers). The
+sender, the collector and the database container all share the same 8 CPUs.
 
-| Metric | Value |
-|---|---|
-| Send rate offered | ~200,000–260,000 datagrams/s (~15–19 MB/s; the sender shares the CPU with the collector and the database) |
-| Records durably ingested (committed to Postgres) | **~43,000 records/s (~3.1 MB/s)** |
-| Mean `WriteBatch` latency, 2,000-row batch, 4 workers | ~205 ms |
-| Dropped (pipeline buffer full) | ~1.5M of ~2.0M sent |
-| Batch write errors | 0 |
+Two tests, same wire path, different sink — so the collector's own ceiling and the database's are
+separate numbers:
 
-The gap between "offered" and "ingested" is the real finding: **on this machine, Postgres write
-throughput — not the pipeline, not decode, not the kernel UDP path — is the ceiling.** A single
-exporter flooding at line rate saturates the pipeline buffer almost immediately because each
-2,000-record batch is one round trip to the database. A slower or busier database caps out lower,
-a faster one higher. This is exactly what `docs/runbook.md`'s "a sink is falling behind" playbook
-(widen `NFC_WORKERS`, tune batch size, add a second sink, or move to bigger iron) exists for.
+| | Collector only (`TestEndToEndUDPThroughputStubSink`) | Collector + TimescaleDB (`TestEndToEndUDPThroughput`) |
+|---|---|---|
+| Send rate offered | ~256,000 datagrams/s (~18.4 MB/s) | ~194,000 datagrams/s (~14 MB/s; the database now competes for the CPU) |
+| Records ingested | **~242,000 records/s (~17.4 MB/s)** | **~56,000 records/s (~4.0 MB/s)** durably committed |
+| Dropped (pipeline buffer full) | **0** | ~1.25M of ~1.94M sent |
+| Unaccounted (kernel UDP socket loss) | ~145,000 (~6% of sent) | ~126,000 |
+| Mean `WriteBatch`, 2,000-row batch, 4 workers | — | ~156 ms |
+| Batch write errors | — | 0 |
+
+**Read the two columns together.** The collector — UDP socket, `goflow2` decode, the bounded
+pipeline, batching — absorbs ~94% of everything a single sender can push over loopback on this
+machine with zero pipeline drops; what it misses is lost in the kernel's UDP receive buffer before
+the process ever sees it (a `net.core.rmem_max` / `SO_RCVBUF` matter, not a collector one). Put a
+real database behind the same path and the number is set by that database: on this machine, four
+Postgres backend processes each pin a CPU core and the collector process idles at ~1.3 cores.
+
+**The database is the ceiling, and it is yours.** This project ships the collector, not the
+database. The write path is as cheap as the measurements below could make it while keeping the
+dedup contract; beyond that the levers are the operator's: a dedicated database host, its core
+count (`NFC_WORKERS` ≈ the cores you are willing to give Postgres), its memory and storage, and
+its configuration. `docs/runbook.md` (*a sink is falling behind*) lists what to look at and the
+order to try it in.
+
+### Where the Postgres write time goes
+
+`internal/sink/postgres/insert_bench_load_test.go` (also behind the `load` tag) times 2,000-row
+batches on one connection with no UDP and no pipeline, so each lever is a number:
+
+```bash
+go test -tags=load -run TestInsertPathBenchmark -v ./internal/sink/postgres/...
+```
+
+| Insert path | ms / batch | rows / s (1 connection) |
+|---|---|---|
+| hypertable, `unnest` insert with `ON CONFLICT DO NOTHING` (the fallback path) | 99.7 | 20,061 |
+| hypertable, **`COPY` (the fast path)** | 58.3 | 34,308 |
+| hypertable, `COPY` into a temp table then `INSERT … SELECT … ON CONFLICT` | 96.7 | 20,672 |
+| plain table (same columns and indexes), `unnest` | 58.7 | 34,094 |
+| plain table, `COPY` | 23.3 | 85,714 |
+| hypertable, `unnest`, both secondary indexes dropped | 86.9 | 23,019 |
+| hypertable, `COPY`, both secondary indexes dropped | 52.7 | 37,942 |
+
+What the table decided:
+
+- **`WriteBatch` COPYs first and falls back on a unique violation.** `COPY` is ~1.7× the rows per
+  CPU-second of the `unnest` insert on the hypertable, but it cannot carry `ON CONFLICT DO
+  NOTHING`. So the sink COPYs the batch; if the `(received_at, dedup_key)` index rejects a row — a
+  redelivered Kafka record already stored — Postgres discards the whole COPY and the sink retries
+  that batch through the conflict-tolerant insert. The sink never inspects `DedupKey` or where a
+  record came from: the database decides which path a batch takes, and the index still does the
+  dedup work. UDP batches (`dedup_key` NULL, never conflicting) always take the fast path; the
+  conformance suite proves a batch mixing new and redelivered records stores exactly the new ones.
+- **The staged-COPY design was not worth building.** It measured the same as the plain insert
+  (96.7 vs 99.7 ms): the cost was never parsing or binding, it is the `INSERT … ON CONFLICT`
+  executor path on the hypertable.
+- **The hypertable costs ~40 ms per batch on either path** (+60–150% over a plain table). That is
+  TimescaleDB's chunk routing, and it buys chunk-drop retention and time partitioning; it stays.
+- **Indexes are ~13% of the batch.** `idx_flow_records_received_seq` duplicated the primary key
+  and is dropped by migration `00002`; the two that remain serve the API's exporter and source
+  address filters.
+- **`synchronous_commit=off` changed nothing** (measured, not assumed): one WAL flush per
+  2,000-row batch is ~20 per second.
 
 **How `NFC_WORKERS` behaves against this database:**
 
@@ -88,32 +140,26 @@ a faster one higher. This is exactly what `docs/runbook.md`'s "a sink is falling
 | 4 (default) | 205 ms | ~43,000 records/s | 0 |
 | 8 | 448 ms | ~41,000 records/s | 0 |
 
-Four workers is the knee on this hardware: latency per batch rises a little because the inserts
+(Measured before the COPY fast path; the shape, not the absolute numbers, is the point.) Four
+workers is the knee on this hardware: latency per batch rises a little because the inserts
 genuinely run concurrently, and total throughput more than doubles. Eight workers just queue on the
-same database — latency doubles and throughput does not move. Re-measure on your database before
-raising the default; the knee is a property of the database, not the collector.
+same 8 CPUs — latency doubles and throughput does not move. Re-measure on your database before
+raising the default; the knee is a property of the database host, not the collector.
 
-**What this test found and fixed.** The first run measured only ~18,000 records/s with 4 workers —
-no better than 1 worker — and logged a handful of `deadlock detected (SQLSTATE 40P01)` errors.
-Both symptoms had one cause: each batch's transaction first touched (or inserted) the exporter row
-to advance `last_seen_at`, and then held that row lock until the batch committed. With every
-worker writing for the same exporter, the workers were serialised on that lock, and two of them
-occasionally took the exporter lock and the flow-record unique index in opposite orders, which
-Postgres's deadlock detector resolved by aborting one. The exporter resolution now runs as
-autocommit statements *before* the record insert, in both `internal/sink/postgres` and
-`internal/sink/mariadb`. The row lock lasts one statement instead of one batch, the deadlock cycle
-no longer exists, and `last_seen_at` is still advanced at most once per batch per exporter. The
-same run went from ~18,000 to ~43,000 records/s with zero write errors.
+**What the first run found and fixed.** It measured only ~18,000 records/s with 4 workers — no
+better than 1 — and logged a handful of `deadlock detected (SQLSTATE 40P01)` errors. Both symptoms
+had one cause: each batch's transaction touched (or inserted) the exporter row to advance
+`last_seen_at` and then held that row lock until the batch committed, so every worker writing for
+the same exporter queued on it, and two of them occasionally took the exporter lock and the
+flow-record unique index in opposite orders. The exporter resolution now runs as autocommit
+statements *before* the record insert, in both backends. The row lock lasts one statement instead
+of one batch, the deadlock cycle no longer exists, and `last_seen_at` is still advanced at most
+once per batch per exporter.
 
-An earlier, narrower fix — not publishing a brand-new exporter's id to the in-process cache until
-its transaction had committed, so a rolled-back insert could not poison the cache — is subsumed by
-this one: an autocommitted upsert is durable by the time it returns, so its id is safe to cache
-immediately.
-
-Numbers here are single-exporter, loopback, one dev machine running the collector and the
-TimescaleDB container side by side — they are a methodology and a rough order of magnitude, not a
-capacity guarantee for any specific deployment. Re-measure against production-like hardware,
-network path and exporter fan-out before sizing a real fleet.
+Numbers here are single-exporter, loopback, one dev machine running the sender, the collector and
+the TimescaleDB container side by side — a methodology and an order of magnitude, not a capacity
+guarantee. Re-measure against production-like hardware, network path and exporter fan-out before
+sizing a real fleet.
 
 ## Configuration
 

@@ -68,7 +68,8 @@ The full stack, collector included, runs as containers with
 | Vet · lint | `go vet ./...` · `go tool golangci-lint run ./...` |
 | Tests (needs Docker) | `go test -race ./...` |
 | Load test | `go test -tags=load -run TestPipelineLoad ./internal/pipeline/...` (no `-race`) |
-| End-to-end throughput | `go test -tags=load -run TestEndToEndUDPThroughput -v ./internal/app/...` — real UDP + decode + Postgres, see `docs/performance.md` |
+| End-to-end throughput | `go test -tags=load -run TestEndToEndUDPThroughput -v ./internal/app/...` — real UDP + decode into a stub sink and into Postgres, see `docs/performance.md` |
+| Insert-path benchmark | `go test -tags=load -run TestInsertPathBenchmark -v ./internal/sink/postgres/...` — `COPY` vs `unnest`, hypertable vs plain table |
 | OpenAPI document | `./bin/collector -dump-openapi > docs/openapi.json` |
 | Services up · down | `docker compose up -d --wait` · `docker compose down` |
 

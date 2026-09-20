@@ -1,6 +1,7 @@
 # NetFlow Collector
 
 [![CI](https://github.com/bogie5464/netflow-collector/actions/workflows/ci.yml/badge.svg)](https://github.com/bogie5464/netflow-collector/actions/workflows/ci.yml)
+[![Lint](https://github.com/bogie5464/netflow-collector/actions/workflows/lint.yml/badge.svg)](https://github.com/bogie5464/netflow-collector/actions/workflows/lint.yml)
 [![Coverage](https://github.com/bogie5464/netflow-collector/raw/main/.github/badges/coverage.svg)](https://github.com/bogie5464/netflow-collector/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 

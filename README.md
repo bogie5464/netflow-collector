@@ -10,22 +10,23 @@ storage backends, and serves it through an authenticated REST API — all as one
 Go binary, with no runtime dependency beyond the database you point it at.
 
 **No vendor lock-in.** Every storage engine implements the same `flow.Backend` contract and passes
-the same conformance suite, so PostgreSQL/TimescaleDB and MariaDB are equally first-class today,
-and a third backend — ClickHouse, SQLite, S3/Parquet, whatever your fleet already runs — is a
-documented procedure (`docs/extending.md`), not a rewrite. Switching backends, or running two of
+the same conformance suite, so PostgreSQL/TimescaleDB, MariaDB and ClickHouse are equally first-class
+today, and another backend — SQLite, S3/Parquet, whatever your fleet already runs — is a documented
+procedure (`docs/extending.md`), not a rewrite. Switching backends, or running two of
 them side by side, never touches the ingest path, the API, or anything upstream of `flow.Sink`.
 
 - **Ingest:** UDP NetFlow/IPFIX (`goflow2` decoding) and Kafka (`franz-go`), through a bounded
   pipeline that drops-and-counts under backpressure instead of blocking an exporter.
-- **Storage:** PostgreSQL/TimescaleDB (recommended) and MariaDB, behind one `flow.Backend`
-  contract that both implementations prove with the same conformance suite.
+- **Storage:** PostgreSQL/TimescaleDB, MariaDB and ClickHouse, behind one `flow.Backend` contract
+  that all three implementations prove with the same conformance suite.
 - **Query:** `GET /v1/flows` with a mandatory time range, whitelisted filters and keyset cursor
   pagination, plus `GET /v1/exporters` for fleet inventory.
-- **Testing:** the conformance suite runs against real PostgreSQL and MariaDB containers via
-  `testcontainers-go`, never mocks; 90%+ statement coverage, enforced in CI with the race detector
+- **Testing:** the conformance suite runs against real PostgreSQL, MariaDB and ClickHouse containers
+  via `testcontainers-go`, never mocks; 90%+ statement coverage, enforced in CI with the race detector
   on every run.
 - **Operations:** Prometheus metrics, redacted structured JSON logging, `/healthz`/`/readyz`
-  liveness and readiness, a sub-30MB distroless container image, and a CI pipeline that also gates
+  liveness and readiness, a distroless container image with a ~31 MB static binary (CI gates it
+  under 40 MB), and a CI pipeline that also gates
   on `golangci-lint` and a vulnerability scan.
 - **Extending:** adding a new flow source or storage backend is a documented procedure
   (`docs/extending.md`) with a Claude Code skill (`add-flow-source`, `add-storage-backend`) that
@@ -43,7 +44,7 @@ Docker with Compose v2 are the only prerequisites.
 
 ```bash
 cp .env.example .env                              # every NFC_* variable with a working local value
-docker compose up -d --wait                       # TimescaleDB :15432, MariaDB :13306, Redpanda :19092
+docker compose up -d --wait                       # TimescaleDB :15432, MariaDB :13306, ClickHouse :19000, Redpanda :19092
 go build -o bin/collector ./cmd/collector && ./bin/collector
 ```
 
@@ -68,7 +69,7 @@ The full stack, collector included, runs as containers with
 | Vet · lint | `go vet ./...` · `go tool golangci-lint run ./...` |
 | Tests (needs Docker) | `go test -race ./...` |
 | Load test | `go test -tags=load -run TestPipelineLoad ./internal/pipeline/...` (no `-race`) |
-| End-to-end throughput | `go test -tags=load -run TestEndToEndUDPThroughput -v ./internal/app/...` — real UDP + decode into a stub sink and into Postgres, see `docs/performance.md` |
+| End-to-end throughput | `go test -tags=load -run TestEndToEndUDPThroughput -v ./internal/app/...` — real UDP + decode into a stub sink, Postgres and ClickHouse, see `docs/performance.md` |
 | Insert-path benchmark | `go test -tags=load -run TestInsertPathBenchmark -v ./internal/sink/postgres/...` — `COPY` vs `unnest`, hypertable vs plain table |
 | OpenAPI document | `./bin/collector -dump-openapi > docs/openapi.json` |
 | Services up · down | `docker compose up -d --wait` · `docker compose down` |
@@ -85,9 +86,9 @@ invalid value exits with code 2 and names the variable.
 | Variable | Meaning |
 |---|---|
 | `NFC_SOURCES` | Comma-separated inputs: `netflow`, `kafka` |
-| `NFC_SINKS` | Comma-separated backends: `postgres`, `mariadb` — batches fan out to all of them |
+| `NFC_SINKS` | Comma-separated backends: `postgres`, `mariadb`, `clickhouse` — batches fan out to all of them |
 | `NFC_NETFLOW_ADDR` · `NFC_HTTP_ADDR` | UDP listen address · API listen address |
-| `NFC_POSTGRES_DSN` · `NFC_MARIADB_DSN` | Required only when the backend is in `NFC_SINKS`; the MariaDB DSN must carry `parseTime=true&loc=UTC` |
+| `NFC_POSTGRES_DSN` · `NFC_MARIADB_DSN` · `NFC_CLICKHOUSE_DSN` | Required only when the backend is in `NFC_SINKS`; the MariaDB DSN must carry `parseTime=true&loc=UTC`; the ClickHouse DSN is the native protocol (`clickhouse://user:pass@host:9000/db`) |
 | `NFC_KAFKA_BROKERS` · `_TOPIC` · `_GROUP` | Required only when `kafka` is in `NFC_SOURCES` |
 | `NFC_API_KEYS` | Comma-separated bearer keys for `/v1`. Generate with `openssl rand -hex 32`. Empty while the API is enabled is a boot error, never "no key required" |
 | `NFC_PIPELINE_BUFFER` · `NFC_BATCH_SIZE` · `NFC_BATCH_INTERVAL` · `NFC_WORKERS` | Backpressure and batching (defaults 65536 · 2000 · 1s · 4) |
@@ -98,10 +99,11 @@ invalid value exits with code 2 and names the variable.
 
 | Backend | Driver | Partitioning | Retention | Notes |
 |---|---|---|---|---|
-| `postgres` (TimescaleDB) | `pgx/v5` | Hypertable on `received_at` | Timescale retention policy (chunk drop) | Recommended production default |
+| `postgres` (TimescaleDB) | `pgx/v5` | Hypertable on `received_at` | Timescale retention policy (chunk drop) | Recommended default for query-heavy, moderate-volume deployments |
 | `mariadb` | `database/sql` + `go-sql-driver/mysql` | None in v1 | Chunked `DELETE` on an hourly ticker | See the retention caveat in `docs/runbook.md` |
+| `clickhouse` | `clickhouse-go/v2` (native protocol) | `ReplacingMergeTree` partitioned by day | Table `TTL` | Highest ingest rate; dedup is built into the sorting key, see `docs/extending.md` |
 
-Both pass `internal/sink/sinktest.Conformance` unmodified. Adding a third is a documented
+All three pass `internal/sink/sinktest.Conformance` unmodified. Adding another is a documented
 procedure: `docs/extending.md`.
 
 ## Process exit codes

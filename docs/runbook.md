@@ -101,6 +101,24 @@ docker compose exec mariadb mariadb -unetflow -pnetflow netflow -e \
 docker compose exec mariadb mariadb -unetflow -pnetflow netflow -e "SHOW FULL PROCESSLIST;"
 ```
 
+**ClickHouse:** every `WriteBatch` is one synchronous `INSERT`, and every `INSERT` is one on-disk
+part that background merges must fold in. Size batches for that: `NFC_BATCH_SIZE=20000` or more
+(the 1 s `NFC_BATCH_INTERVAL` still bounds latency), so a busy collector issues a few inserts per
+second rather than a hundred. `Too many parts` in a write error is the server refusing inserts
+until merges catch up — raise the batch size first, then look at merge threads on the server.
+Async inserts (`async_insert=1&wait_for_async_insert=1` as `NFC_CLICKHOUSE_DSN` query parameters)
+are supported but measured slower for this workload (`docs/performance.md`), and
+`wait_for_async_insert=0` breaks migrations. Retention is a table `TTL` applied by `Migrate` from
+`NFC_RETENTION_DAYS`; expired rows go at merge time, so `flow_records` can briefly hold rows older
+than the window.
+
+```bash
+docker compose exec clickhouse clickhouse-client --user netflow --password netflow --query \
+  "SELECT partition, count() AS parts, sum(rows) AS rows FROM system.parts WHERE table='flow_records' AND active GROUP BY partition ORDER BY partition DESC LIMIT 5"
+docker compose exec clickhouse clickhouse-client --user netflow --password netflow --query \
+  "SELECT count() AS running_merges FROM system.merges WHERE table='flow_records'"
+```
+
 **Recover:** fix the backend, or remove it from `NFC_SINKS` temporarily and restart — the other
 sink continues to receive every batch. Records that were lost to write errors on the failing sink
 are not replayed; the UDP path is best-effort by design. Re-add the sink when it is healthy.

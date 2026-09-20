@@ -79,7 +79,12 @@ Rules that decide whether it works:
 
 - **The schema must give `UNIQUE (received_at, dedup_key)` with NULLs distinct.** That is what
   dedups Kafka redelivery while leaving the UDP path append-only. If your engine treats NULLs as
-  equal in a unique index you need another mechanism, and you must say so here.
+  equal in a unique index, or has no unique index at all, you need another mechanism, and you must
+  say so here. ClickHouse is the shipped example: `flow_records` is a `ReplacingMergeTree` whose
+  sorting key is `(received_at, seq)`, where `seq` is a `MATERIALIZED` column the table derives —
+  from `dedup_key` when there is one, so a redelivery collapses onto the same key, and `rand64()`
+  when there is not, so UDP records never collide. Reads use `FINAL`. The branch lives in the DDL;
+  the sink still writes every record identically.
 - **Write conflict-tolerantly** (`ON CONFLICT DO NOTHING`, `INSERT IGNORE`, or the engine's
   equivalent) and never branch on where a record came from.
 - **Truncate every timestamp to microseconds on write.** Go carries nanoseconds; the conformance
@@ -87,13 +92,31 @@ Rules that decide whether it works:
 - **Keyset pagination**: `(received_at, seq) < (t, s)` with `ORDER BY received_at DESC, seq DESC`,
   an opaque base64url cursor of `{"t","s"}`, and an `ErrBadCursor` for an undecodable one.
 - **Resolve exporters through a bounded cache** and advance `last_seen_at` at most once per batch
-  per exporter — never per record.
-- **Do not edit `internal/sink/sinktest/conformance.go`.** If the suite needs a branch for your
-  engine, the interface leaked; the build gate diffs that file against its committed state.
+  per exporter — never per record. An engine without sequences can derive the id from the address
+  instead (ClickHouse uses a 63-bit FNV-1a of the 16-byte form): a pure function needs no cache
+  and lets any number of instances agree without coordination.
+- **Do not edit `internal/sink/sinktest/conformance.go` to make your engine pass.** If the suite
+  needs a branch for your engine, the interface leaked. Adding an assertion that states a contract
+  property every backend must hold is a different thing and is welcome — that is how the mixed
+  redelivery case got there.
 
-Then wire it: add the name to `config.Config`'s `NFC_SINKS` `oneof` list, the DSN variable
-(required **only** when the engine is in `NFC_SINKS`) to `.env.example` and
-`internal/config/config.go`, and the constructor to `newBackend` in `internal/app/run.go`.
+Then wire it, in every place that names a backend:
+
+- `internal/config/config.go`: the `Sink<Engine>` constant, the `NFC_SINKS` `oneof` list, the
+  `NFC_<ENGINE>_DSN` field (`required_if=<Engine>Enabled true`), the `<Engine>Enabled` derived
+  field and its `slices.Contains` line in `parse`. `internal/config/config_test.go` asserts the
+  exact `oneof` message — update it.
+- `internal/app/run.go`: **both** switches — `CheckNames`, which rejects unknown names before any
+  database is touched, and `newBackend`, which constructs.
+- `.env.example` (the DSN with a working local value, and the comment listing the sinks),
+  `docker-compose.yml` (the service, its named volume, the `collector` service's `NFC_<ENGINE>_DSN`
+  and `depends_on`), `README.md` (the backend table, the `NFC_SINKS` row, the DSN row, the quick-start
+  port comment) and `CLAUDE.md` (stack line, environment table).
+- If the driver is a new dependency, build the image and check it against the CI size budget
+  (`.github/workflows/ci.yml`, *Image size under 30 MB*) before you commit.
+- If tests outside your package need the container — the end-to-end throughput test in
+  `internal/app` does — put the `Start<Engine>(t)` helper and the image constant in a new file
+  under `internal/sink/sinktest/` (not in `conformance.go`), as `sinktest/clickhouse.go` does.
 
 Verify:
 
@@ -111,3 +134,4 @@ go tool golangci-lint run ./...
 |---|---|---|---|---|---|
 | `postgres` | `internal/sink/postgres` | PostgreSQL 17 + TimescaleDB | `migrations/postgres/` | `timescaledb` (`127.0.0.1:15432`) | `add_retention_policy` on the hypertable |
 | `mariadb` | `internal/sink/mariadb` | MariaDB 11.8 | `migrations/mariadb/` | `mariadb` (`127.0.0.1:13306`) | chunked `DELETE` on an hourly ticker |
+| `clickhouse` | `internal/sink/clickhouse` | ClickHouse 25.8 | `migrations/clickhouse/` | `clickhouse` (`127.0.0.1:19000`) | table `TTL`, set by `Migrate` from `NFC_RETENTION_DAYS` |

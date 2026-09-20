@@ -35,7 +35,8 @@ and `go.sum` — read them, never guess one.
 ## Stack
 
 Go static binary · `net/http` stdlib ServeMux · pgx/v5 + TimescaleDB (default backend) ·
-database/sql + go-sql-driver/mysql (MariaDB backend) · goose migrations embedded via `//go:embed` ·
+database/sql + go-sql-driver/mysql (MariaDB backend) · clickhouse-go/v2 (ClickHouse backend) · goose
+migrations embedded via `//go:embed` ·
 goflow2/v2 decoding · franz-go Kafka · slog + OpenTelemetry + Prometheus · Docker Compose.
 
 ## Architecture
@@ -43,7 +44,7 @@ goflow2/v2 decoding · franz-go Kafka · slog + OpenTelemetry + Prometheus · Do
 **Ingest path.** exporter UDP datagram → `internal/source/netflow` (implements `flow.Source`) →
 bounded channel in `internal/pipeline` → batcher (size `NFC_BATCH_SIZE` or age `NFC_BATCH_INTERVAL`)
 → worker pool → `WriteBatch` fanned out in parallel to every configured `flow.Sink`
-(`internal/sink/postgres`, `internal/sink/mariadb`).
+(`internal/sink/postgres`, `internal/sink/mariadb`, `internal/sink/clickhouse`).
 
 **Query path.** `GET /v1/flows` → `internal/api/auth.go` middleware → `internal/api/flows.go`
 (validator/v10 over the request struct) → `flow.Querier` → the backend's keyset query → envelope.
@@ -71,7 +72,7 @@ source and never grow the buffer. `ingested + dropped == offered` is an invarian
 | Optional storage capabilities | `internal/flow/exporter.go` — e.g. `ExporterLister`, discovered by type assertion (`backend.(flow.ExporterLister)`). Never added to `Backend` itself |
 | Domain types | `internal/flow/flow.go` — `FlowRecord`, `FlowQuery`, `FlowResultPage` |
 | Env access | `internal/config/config.go` — validated once at boot; nothing else reads `os.Getenv`, except `cmd/collector/main.go`'s `-healthcheck` path, which reads `NFC_HTTP_ADDR` directly because it must run before config validation |
-| Schema | `migrations/postgres/*.sql`, `migrations/mariadb/*.sql`, embedded by `migrations/embed.go` |
+| Schema | `migrations/postgres/*.sql`, `migrations/mariadb/*.sql`, `migrations/clickhouse/*.sql`, embedded by `migrations/embed.go` |
 | Storage conformance | `internal/sink/sinktest/conformance.go` — every backend passes it unmodified |
 | Metrics | `internal/obs/metrics.go` — instruments are created once, here (`netflow_packets_decode_errors_total` at package scaffold time, the other six with the pipeline) |
 | Image tags, ports, credentials | `docker-compose.yml` |
@@ -107,9 +108,10 @@ shell. `.env.example` is committed and stays in sync; `.env` is not.
 | Variable | Required | Used by | Source |
 |---|---|---|---|
 | `NFC_SOURCES` | yes | `internal/app/run.go` | `netflow`, `kafka`, or both |
-| `NFC_SINKS` | yes | `internal/app/run.go` | `postgres`, `mariadb`, or both |
+| `NFC_SINKS` | yes | `internal/app/run.go` | any of `postgres`, `mariadb`, `clickhouse` |
 | `NFC_POSTGRES_DSN` | if `postgres` enabled | `internal/sink/postgres` | `docker-compose.yml` host port 15432 |
 | `NFC_MARIADB_DSN` | if `mariadb` enabled | `internal/sink/mariadb` | `docker-compose.yml` host port 13306 |
+| `NFC_CLICKHOUSE_DSN` | if `clickhouse` enabled | `internal/sink/clickhouse` | `docker-compose.yml` host port 19000 |
 | `NFC_KAFKA_BROKERS` `_TOPIC` `_GROUP` | if `kafka` enabled | `internal/source/kafka` | `docker-compose.yml` host port 19092 |
 | `NFC_API_KEYS` | if the API is enabled | `internal/api/auth.go` | `openssl rand -hex 32` |
 | `NFC_HTTP_ADDR` `NFC_NETFLOW_ADDR` | yes | `internal/app/run.go` | `.env.example` |

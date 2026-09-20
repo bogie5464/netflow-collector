@@ -15,6 +15,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bogie5464/netflow-collector/internal/config"
 	"github.com/bogie5464/netflow-collector/internal/flow"
 	"github.com/bogie5464/netflow-collector/internal/obs"
 	"github.com/bogie5464/netflow-collector/internal/pipeline"
@@ -30,8 +31,22 @@ const sendWindow = 10 * time.Second
 // docs/performance.md. It blasts v5 datagrams for a fixed window and reads
 // the same Prometheus counters an operator would.
 func TestEndToEndUDPThroughput(t *testing.T) {
-	dsn := sinktest.StartTimescale(t)
-	cfg := testConfig(dsn)
+	cfg := testConfig(sinktest.StartTimescale(t))
+	measureAgainst(t, cfg, "postgres", "durably ingested (Postgres)")
+}
+
+// TestEndToEndUDPThroughputClickHouse is the same measurement with the
+// ClickHouse backend as the only sink.
+func TestEndToEndUDPThroughputClickHouse(t *testing.T) {
+	cfg := testConfig("")
+	cfg.Sinks = []string{config.SinkClickHouse}
+	cfg.PostgresEnabled, cfg.ClickHouseEnabled = false, true
+	cfg.ClickHouseDSN = sinktest.StartClickHouse(t)
+	measureAgainst(t, cfg, "clickhouse", "durably ingested (ClickHouse)")
+}
+
+func measureAgainst(t *testing.T, cfg config.Config, sink, label string) {
+	t.Helper()
 	cfg.PipelineBuffer = 65536
 	cfg.BatchSize = 2000
 	cfg.BatchInterval = time.Second
@@ -51,20 +66,20 @@ func TestEndToEndUDPThroughput(t *testing.T) {
 		t.Fatal("app did not start")
 	}
 
-	writeErrBefore := testutil.ToFloat64(obs.BatchWriteErrors.WithLabelValues("postgres"))
-	writeSumBefore, writeCountBefore := histogram(t, obs.BatchWriteDuration.WithLabelValues("postgres"))
+	writeErrBefore := testutil.ToFloat64(obs.BatchWriteErrors.WithLabelValues(sink))
+	writeSumBefore, writeCountBefore := histogram(t, obs.BatchWriteDuration.WithLabelValues(sink))
 
 	c := blast(t, a.NetFlowAddr())
 
-	writeErrs := testutil.ToFloat64(obs.BatchWriteErrors.WithLabelValues("postgres")) - writeErrBefore
-	writeSumAfter, writeCountAfter := histogram(t, obs.BatchWriteDuration.WithLabelValues("postgres"))
+	writeErrs := testutil.ToFloat64(obs.BatchWriteErrors.WithLabelValues(sink)) - writeErrBefore
+	writeSumAfter, writeCountAfter := histogram(t, obs.BatchWriteDuration.WithLabelValues(sink))
 	writeCount := writeCountAfter - writeCountBefore
 	writeSum := writeSumAfter - writeSumBefore
 	if writeCount > 0 {
 		t.Logf("WRITES:   %d WriteBatch calls, %.3fs total => %.1f ms mean per batch, %.0f records/s per worker, %.0f batch write errors",
 			writeCount, writeSum, 1000*writeSum/float64(writeCount), float64(cfg.BatchSize)*float64(writeCount)/writeSum, writeErrs)
 	}
-	c.report(t, "durably ingested (Postgres)")
+	c.report(t, label)
 
 	cancel()
 	require.NoError(t, <-done)

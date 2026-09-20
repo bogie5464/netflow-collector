@@ -26,7 +26,7 @@ distroless base and the static build actually held.
 ## Running the stack with Compose
 
 ```bash
-docker compose up -d --wait                          # infrastructure only: timescaledb, mariadb, redpanda
+docker compose up -d --wait                          # infrastructure only: timescaledb, mariadb, clickhouse, redpanda
 docker compose --profile app up -d --build --wait    # plus the collector
 docker compose --profile app ps                      # every service reports healthy
 curl -s http://127.0.0.1:8080/readyz | jq

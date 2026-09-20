@@ -85,12 +85,11 @@ the process ever sees it (a `net.core.rmem_max` / `SO_RCVBUF` matter, not a coll
 real database behind the same path and the number is set by that database: on this machine, four
 Postgres backend processes each pin a CPU core and the collector process idles at ~1.3 cores.
 
-**The database is the ceiling, and it is yours.** This project ships the collector, not the
-database. The write path is as cheap as the measurements below could make it while keeping the
-dedup contract; beyond that the levers are the operator's: a dedicated database host, its core
-count (`NFC_WORKERS` ≈ the cores you are willing to give Postgres), its memory and storage, and
-its configuration. `docs/runbook.md` (*a sink is falling behind*) lists what to look at and the
-order to try it in.
+**Sustained throughput is set by the database host.** The write path is as cheap as the
+measurements below could make it while keeping the dedup contract; the remaining headroom is in
+how the database is sized and configured — a dedicated host, its core count (`NFC_WORKERS` ≈ the
+cores available to Postgres), its memory and storage, and its settings. `docs/runbook.md`
+(*a sink is falling behind*) lists what to look at and the order to try it in.
 
 ### Where the Postgres write time goes
 

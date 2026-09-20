@@ -1,7 +1,9 @@
 # NetFlow Collector
 
 A Go daemon that ingests NetFlow v5/v9/IPFIX and Kafka flow records into pluggable storage
-backends, and serves them over a small REST API. Operators are network engineers and SREs.
+backends, and serves them over a small REST API. No vendor lock-in: every backend implements the
+same `flow.Backend` contract and passes the same conformance suite, so swapping or adding storage
+engines never touches the ingest path or the API.
 
 ## Commands
 
@@ -65,12 +67,13 @@ source and never grow the buffer. `ingested + dropped == offered` is an invarian
 
 | Concern | Single source of truth |
 |---|---|
-| The two pluggable boundaries | `internal/flow/ports.go` — `Source`, `Sink`, `Querier`, `Backend` |
+| The two pluggable boundaries | `internal/flow/ports.go` — `Source`, `Sink`, `Querier`, `Backend`, and nothing else |
+| Optional storage capabilities | `internal/flow/exporter.go` — e.g. `ExporterLister`, discovered by type assertion (`backend.(flow.ExporterLister)`). Never added to `Backend` itself |
 | Domain types | `internal/flow/flow.go` — `FlowRecord`, `FlowQuery`, `FlowResultPage` |
-| Env access | `internal/config/config.go` — validated once at boot; nothing else reads `os.Getenv` |
+| Env access | `internal/config/config.go` — validated once at boot; nothing else reads `os.Getenv`, except `cmd/collector/main.go`'s `-healthcheck` path, which reads `NFC_HTTP_ADDR` directly because it must run before config validation |
 | Schema | `migrations/postgres/*.sql`, `migrations/mariadb/*.sql`, embedded by `migrations/embed.go` |
 | Storage conformance | `internal/sink/sinktest/conformance.go` — every backend passes it unmodified |
-| Metrics | `internal/obs/metrics.go` — instruments are created once, here |
+| Metrics | `internal/obs/metrics.go` — instruments are created once, here (`netflow_packets_decode_errors_total` at package scaffold time, the other six with the pipeline) |
 | Image tags, ports, credentials | `docker-compose.yml` |
 
 ## Code rules

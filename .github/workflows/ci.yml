@@ -15,6 +15,8 @@ jobs:
   gate:
     name: build, vet, lint, test, vuln scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # only used by the coverage-badge commit step, on pushes to main
     steps:
       - uses: actions/checkout@v4
 
@@ -42,7 +44,37 @@ jobs:
         run: go tool golangci-lint run ./...
 
       - name: Test
-        run: go test -race -cover ./...
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Coverage percentage
+        id: coverage
+        run: |
+          pct=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%","",$3); print $3}')
+          color=$(awk -v p="$pct" 'BEGIN {
+            if (p >= 80) print "brightgreen";
+            else if (p >= 60) print "yellow";
+            else print "red"
+          }')
+          echo "percentage=$pct" >> "$GITHUB_OUTPUT"
+          echo "color=$color" >> "$GITHUB_OUTPUT"
+
+      - name: Generate coverage badge
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: emibcn/badge-action@v2.0.2
+        with:
+          label: coverage
+          status: "${{ steps.coverage.outputs.percentage }}%"
+          color: ${{ steps.coverage.outputs.color }}
+          path: .github/badges/coverage.svg
+
+      - name: Commit coverage badge
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/badges/coverage.svg
+          git diff --cached --quiet || git commit -m "chore: update coverage badge [skip ci]"
+          git push
 
       - name: Vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

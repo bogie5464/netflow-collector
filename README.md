@@ -1,8 +1,17 @@
 # NetFlow Collector
 
+[![CI](https://github.com/bogie5464/netflow-collector/actions/workflows/ci.yml/badge.svg)](https://github.com/bogie5464/netflow-collector/actions/workflows/ci.yml)
+[![Coverage](https://raw.githubusercontent.com/bogie5464/netflow-collector/main/.github/badges/coverage.svg)](https://github.com/bogie5464/netflow-collector/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A single Go daemon that ingests NetFlow v5/v9/IPFIX datagrams and Kafka flow messages, stores
 them in pluggable storage backends, and serves them over a small, authenticated REST API.
-Operators are network engineers and SREs; consumers are Grafana, `curl` and operator scripts.
+
+**No vendor lock-in.** Every storage engine implements the same `flow.Backend` contract and passes
+the same conformance suite, so PostgreSQL/TimescaleDB and MariaDB are equally first-class today,
+and a third backend — ClickHouse, SQLite, S3/Parquet, whatever your fleet already runs — is a
+documented procedure (`docs/extending.md`), not a rewrite. Switching backends, or running two of
+them side by side, never touches the ingest path, the API, or anything upstream of `flow.Sink`.
 
 - **Ingest:** UDP NetFlow/IPFIX (`goflow2` decoding) and Kafka (`franz-go`), through a bounded
   pipeline that drops-and-counts under backpressure instead of blocking an exporter.
@@ -10,6 +19,10 @@ Operators are network engineers and SREs; consumers are Grafana, `curl` and oper
   contract that both implementations prove with the same conformance suite.
 - **Query:** `GET /v1/flows` with a mandatory time range, whitelisted filters and keyset cursor
   pagination; `GET /v1/exporters`; `/healthz`, `/readyz`, `/metrics` for operations.
+
+Anyone who needs to store and query flow data can run this — it started as tooling for network
+engineers and SREs, and that's still the sharpest use case, but there's nothing network-specific
+about the storage, query or ops layers that would stop anyone else from using it.
 
 ## Quick start
 
@@ -109,5 +122,5 @@ go build ./... && go test -race ./...
 
 ## License
 
-See `LICENSE` if present in your distribution. The Architect design bundle this project was built
-from (`blueprints/netflow-collector/`) is kept out of the repository; it is a local design artefact.
+MIT — see [`LICENSE`](LICENSE). The Architect design bundle this project was built from
+(`blueprints/netflow-collector/`) is kept out of the repository; it is a local design artefact.

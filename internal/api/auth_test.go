@@ -2,15 +2,20 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/bogie5464/netflow-collector/internal/config"
+	"github.com/bogie5464/netflow-collector/internal/flow"
+	"github.com/bogie5464/netflow-collector/internal/obs"
 )
 
 const (
@@ -131,4 +136,77 @@ func TestCheckConfig(t *testing.T) {
 	require.ErrorContains(t, err, "NFC_API_KEYS")
 	err = CheckConfig(config.Config{HTTPAddr: ":8080", APIKeys: []string{goodKey, " "}})
 	require.ErrorContains(t, err, "NFC_API_KEYS")
+}
+
+// --- ops endpoints (registered outside /v1, always public) ---
+
+type pingBackend struct {
+	flow.Backend
+	err   error
+	delay time.Duration
+}
+
+func (b pingBackend) Query(ctx context.Context, _ flow.FlowQuery) (flow.FlowResultPage, error) {
+	if b.delay > 0 {
+		select {
+		case <-time.After(b.delay):
+		case <-ctx.Done():
+			return flow.FlowResultPage{}, ctx.Err()
+		}
+	}
+	return flow.FlowResultPage{}, b.err
+}
+
+func TestOpsEndpoints(t *testing.T) {
+	obs.Prime([]string{"netflow"}, []string{"postgres"})
+	ok := pingBackend{}
+	down := pingBackend{err: errors.New("connection refused")}
+
+	t.Run("healthz is 200 regardless of backends", func(t *testing.T) {
+		h := New(&fakeQuerier{}, map[string]flow.Backend{"postgres": down, "mariadb": down}, config.Config{APIKeys: []string{goodKey}})
+		rr, env := do(h, "/healthz", "")
+		require.Equal(t, http.StatusOK, rr.Code)
+		require.Nil(t, env.Error)
+		require.NotEmpty(t, rr.Header().Get("X-Request-Id"))
+	})
+
+	t.Run("readyz is 200 when every backend answers", func(t *testing.T) {
+		h := New(&fakeQuerier{}, map[string]flow.Backend{"postgres": ok, "mariadb": ok}, config.Config{APIKeys: []string{goodKey}})
+		rr, env := do(h, "/readyz", "")
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		require.Nil(t, env.Error)
+		require.Contains(t, string(env.Data), `"postgres":"ok"`)
+	})
+
+	t.Run("readyz is 503 when any backend fails while healthz stays 200", func(t *testing.T) {
+		h := New(&fakeQuerier{}, map[string]flow.Backend{"postgres": down, "mariadb": down}, config.Config{APIKeys: []string{goodKey}})
+		rr, env := do(h, "/readyz", "")
+		require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+		require.Equal(t, CodeBackendUnavailable, env.Error.Code)
+		require.Equal(t, rr.Header().Get("X-Request-Id"), env.Error.RequestID)
+		require.NotContains(t, rr.Body.String(), "connection refused", "backend detail never reaches the client")
+		rr, _ = do(h, "/healthz", "")
+		require.Equal(t, http.StatusOK, rr.Code)
+	})
+
+	t.Run("readyz gives every backend a 2 s budget", func(t *testing.T) {
+		h := New(&fakeQuerier{}, map[string]flow.Backend{"postgres": pingBackend{delay: 10 * time.Second}}, config.Config{APIKeys: []string{goodKey}})
+		started := time.Now()
+		rr, _ := do(h, "/readyz", "")
+		require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+		require.Less(t, time.Since(started), 4*time.Second)
+	})
+
+	t.Run("metrics is Prometheus text with the six instruments", func(t *testing.T) {
+		h := New(&fakeQuerier{}, nil, config.Config{APIKeys: []string{goodKey}})
+		rr, _ := do(h, "/metrics", "")
+		require.Equal(t, http.StatusOK, rr.Code)
+		require.Contains(t, rr.Header().Get("Content-Type"), "text/plain")
+		for _, name := range []string{
+			"netflow_records_ingested_total", "netflow_records_dropped_total", "netflow_batch_write_duration_seconds",
+			"netflow_batch_write_errors_total", "netflow_pipeline_buffer_length", "netflow_record_visibility_lag_seconds",
+		} {
+			require.Contains(t, rr.Body.String(), name)
+		}
+	})
 }

@@ -71,6 +71,7 @@ func New(q flow.Querier, backends map[string]flow.Backend, cfg config.Config) ht
 
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", requireAPIKey(cfg.APIKeys, s.log, v1))
+	s.registerOps(mux) // /healthz, /readyz, /metrics: public by design
 	mux.HandleFunc("/", notFound)
 	return s.middleware(mux)
 }

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/bogie5464/netflow-collector/internal/api"
 	"github.com/bogie5464/netflow-collector/internal/config"
 	"github.com/bogie5464/netflow-collector/internal/flow"
+	"github.com/bogie5464/netflow-collector/internal/obs"
 	"github.com/bogie5464/netflow-collector/internal/pipeline"
 	"github.com/bogie5464/netflow-collector/internal/sink/mariadb"
 	"github.com/bogie5464/netflow-collector/internal/sink/postgres"
@@ -37,12 +39,29 @@ var (
 // not keep the process alive past the orchestrator's patience.
 const shutdownTimeout = 10 * time.Second
 
-// Run loads configuration, builds the app and runs it until SIGINT/SIGTERM.
+// Run loads configuration, initialises logging and telemetry before
+// anything else, builds the app and runs it until SIGINT/SIGTERM.
 func Run(ctx context.Context) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrConfig, err)
 	}
+	obs.SetupLogging(os.Stderr, cfg.LogLevel, obs.ServiceName)
+	stopMetrics, err := obs.SetupMetrics()
+	if err != nil {
+		return err
+	}
+	stopTracing, err := obs.SetupTracing(ctx, cfg.OTELEnabled, cfg.OTELEndpoint)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrConfig, err)
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = stopTracing(flushCtx)
+		_ = stopMetrics(flushCtx)
+	}()
+
 	a, err := New(ctx, *cfg)
 	if err != nil {
 		return err
@@ -103,6 +122,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	if err := CheckNames(cfg); err != nil {
 		return nil, err
 	}
+	obs.Prime(cfg.Sources, cfg.Sinks)
 	a := &App{
 		cfg:      cfg,
 		log:      slog.Default().With("component", "app"),

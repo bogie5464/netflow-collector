@@ -19,6 +19,7 @@ import (
 	"github.com/bogie5464/netflow-collector/internal/pipeline"
 	"github.com/bogie5464/netflow-collector/internal/sink/mariadb"
 	"github.com/bogie5464/netflow-collector/internal/sink/postgres"
+	"github.com/bogie5464/netflow-collector/internal/source/kafka"
 	"github.com/bogie5464/netflow-collector/internal/source/netflow"
 )
 
@@ -64,7 +65,9 @@ func CheckNames(cfg config.Config) error {
 		}
 	}
 	for _, s := range cfg.Sources {
-		if s != config.SourceNetFlow {
+		switch s {
+		case config.SourceNetFlow, config.SourceKafka:
+		default:
 			return fmt.Errorf("%w: NFC_SOURCES: source %q is not implemented by this binary", ErrConfig, s)
 		}
 	}
@@ -108,7 +111,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		a.backends[name] = b
 	}
 	for _, name := range cfg.Sources {
-		src, err := netflow.New(cfg)
+		src, err := newSource(name, cfg)
 		if err != nil {
 			a.closeBackends()
 			return nil, fmt.Errorf("%w: %s: %w", ErrConfig, name, err)
@@ -142,6 +145,18 @@ func newBackend(ctx context.Context, name string, cfg config.Config) (flow.Backe
 		return mariadb.New(ctx, cfg.MariaDBDSN, cfg.RetentionDays)
 	default:
 		return nil, fmt.Errorf("%w: unknown backend %q", ErrConfig, name)
+	}
+}
+
+// newSource is the source switch: the one place a source package is named.
+func newSource(name string, cfg config.Config) (flow.Source, error) {
+	switch name {
+	case config.SourceNetFlow:
+		return netflow.New(cfg)
+	case config.SourceKafka:
+		return kafka.New(cfg)
+	default:
+		return nil, fmt.Errorf("%w: unknown source %q", ErrConfig, name)
 	}
 }
 

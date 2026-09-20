@@ -214,7 +214,7 @@
       "internal/source/kafka/kafka_test.go",
       "internal/app/run.go"
     ],
-    "status": "pending"
+    "status": "done"
   },
   {
     "id": "E2-T1",

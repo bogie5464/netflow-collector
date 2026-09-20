@@ -4,8 +4,9 @@
 [![Coverage](https://github.com/bogie5464/netflow-collector/raw/main/.github/badges/coverage.svg)](https://github.com/bogie5464/netflow-collector/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A single Go daemon that ingests NetFlow v5/v9/IPFIX datagrams and Kafka flow messages, stores
-them in pluggable storage backends, and serves them over a small, authenticated REST API.
+NetFlow Collector decodes NetFlow v5/v9/IPFIX and Kafka flow traffic, stores it across pluggable
+storage backends, and serves it through an authenticated REST API — all as one statically-linked
+Go binary, with no runtime dependency beyond the database you point it at.
 
 **No vendor lock-in.** Every storage engine implements the same `flow.Backend` contract and passes
 the same conformance suite, so PostgreSQL/TimescaleDB and MariaDB are equally first-class today,
@@ -18,7 +19,17 @@ them side by side, never touches the ingest path, the API, or anything upstream 
 - **Storage:** PostgreSQL/TimescaleDB (recommended) and MariaDB, behind one `flow.Backend`
   contract that both implementations prove with the same conformance suite.
 - **Query:** `GET /v1/flows` with a mandatory time range, whitelisted filters and keyset cursor
-  pagination; `GET /v1/exporters`; `/healthz`, `/readyz`, `/metrics` for operations.
+  pagination, plus `GET /v1/exporters` for fleet inventory.
+- **Testing:** the conformance suite runs against real PostgreSQL and MariaDB containers via
+  `testcontainers-go`, never mocks; 90%+ statement coverage, enforced in CI with the race detector
+  on every run.
+- **Operations:** Prometheus metrics, redacted structured JSON logging, `/healthz`/`/readyz`
+  liveness and readiness, a sub-30MB distroless container image, and a CI pipeline that also gates
+  on `golangci-lint` and a vulnerability scan.
+- **Extending:** adding a new flow source or storage backend is a documented procedure
+  (`docs/extending.md`) with a Claude Code skill (`add-flow-source`, `add-storage-backend`) that
+  walks through it step by step — the same playbook whether the one following it is a person or an
+  agent.
 
 Anyone who needs to store and query flow data can run this — it started as tooling for network
 engineers and SREs, and that's still the sharpest use case, but there's nothing network-specific

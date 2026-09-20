@@ -49,6 +49,58 @@ result: a record is never lost uncounted, and a slow sink never blocks a source.
 These figures are in-memory and say nothing about a database. End-to-end throughput is bounded by
 the slowest configured sink; see `docs/runbook.md` (*a sink is falling behind*) for the levers.
 
+## End-to-end throughput (UDP → decode → Postgres)
+
+The in-memory numbers above answer "is the pipeline the bottleneck" (no). They don't answer "how
+much traffic can one collector actually absorb," because that question is dominated by the sink,
+not the pipeline. `internal/app/loadtest_e2e_test.go` (also behind the `load` tag) answers it
+directly: a real UDP socket, real `goflow2` v5 decode, the real pipeline, and a real TimescaleDB
+container via `testcontainers-go` — no mocks, no in-memory sink.
+
+```bash
+go test -tags=load -run TestEndToEndUDPThroughput -v ./internal/app/...
+```
+
+**Scenario:** one exporter, one v5 datagram per packet (24-byte header + one 48-byte flow record =
+72 bytes), sent back-to-back over loopback for a fixed 10-second window at the shipped-default
+pipeline settings (65,536-record buffer, 2,000-record batches, 1s batch interval, 4 workers).
+
+| Metric | Value |
+|---|---|
+| Send rate offered | ~259,000 datagrams/s (~18.6 MB/s) |
+| Records durably ingested (committed to Postgres) | ~18,354 records/s (~1.3 MB/s) |
+| Dropped (pipeline buffer full) | ~2.3M of ~2.6M sent |
+| Batch write errors | A handful, all in the first ~2s (see below), zero afterward |
+
+The gap between "offered" and "ingested" is the real finding: **on this machine, Postgres write
+throughput — not the pipeline, not decode, not the kernel UDP path — is the ceiling.** A single
+exporter flooding at line rate saturates the pipeline buffer almost immediately because each
+2,000-record batch costs one round-trip transaction (exporter upsert/touch, then a bulk insert,
+then commit) to the database. Four workers doing that sequentially caps out around 18K records/s
+on this hardware; a slower or busier database would cap out lower, a faster one higher. This is
+exactly what `docs/runbook.md`'s "a sink is falling behind" playbook (widen `NFC_WORKERS`, tune
+batch size, add a second Postgres/MariaDB sink, or move to bigger iron) exists for.
+
+**A concurrency bug this test found and fixed.** The first run of this test surfaced a handful of
+`deadlock detected (SQLSTATE 40P01)` errors from Postgres — expected, since many workers race to
+insert the *same brand-new* exporter row concurrently and Postgres's deadlock detector breaks the
+tie by aborting one side. The bug was that the losing transaction's exporter id had already been
+published to the in-process exporter cache *before* its transaction committed, so a rolled-back
+insert poisoned the cache with an id that never durably existed — every subsequent batch then
+failed its foreign key check, forever, with no way to self-heal. Both `internal/sink/postgres` and
+`internal/sink/mariadb` now defer publishing a newly-resolved exporter id to the cache until after
+`Commit` succeeds. Post-fix, the same race still produces a handful of deadlocks at the very first
+moment a new exporter is seen (a real, bounded, self-resolving Postgres phenomenon — the losing
+side simply retries fresh on its next batch), but it no longer cascades: errors stop appearing
+within ~2 seconds and the rest of the run proceeds cleanly. In production this only matters the
+instant a brand-new exporter starts sending, which is rare compared to this adversarial single-
+exporter flood.
+
+Numbers here are single-exporter, loopback, one dev machine running the collector and the
+TimescaleDB container side by side — they are a methodology and a rough order of magnitude, not a
+capacity guarantee for any specific deployment. Re-measure against production-like hardware,
+network path and exporter fan-out before sizing a real fleet.
+
 ## Configuration
 
 Values the load test uses, and what they correspond to in production:

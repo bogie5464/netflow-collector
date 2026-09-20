@@ -95,7 +95,7 @@ jobs:
       - name: Build image
         run: docker compose --profile app build
       - name: Image size under 20 MB
-        run: test "$(docker image inspect "$(docker compose --profile app images -q collector)" --format '{{.Size}}')" -lt 20971520
+        run: test "$(docker image inspect netflow-collector:latest --format '{{.Size}}')" -lt 20971520
 
   nightly-load:
     name: nightly load verification

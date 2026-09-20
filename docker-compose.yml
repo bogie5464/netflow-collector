@@ -69,6 +69,7 @@ services:
     # Behind a profile so `docker compose up -d --wait` in §10 Bootstrap starts only the infra
     # and does not try to build an image before step 11 has written the Dockerfile.
     profiles: ["app"]
+    image: netflow-collector:latest
     build:
       context: .
       dockerfile: Dockerfile

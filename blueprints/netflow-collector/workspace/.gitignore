@@ -1,0 +1,22 @@
+# Build output
+/bin/
+/dist/
+
+# Local environment. .env.example is the committed template — the negation below guarantees it
+# survives `git add -A` even if a broader .env pattern is ever added above it.
+.env
+.env.*.local
+!.env.example
+
+# Go test and profiling artefacts
+*.test
+*.out
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# NOT ignored, deliberately: blueprints/ (the design bundle is committed and /architect-next
+# reads tasks.json from it), .claude/, .golangci.yml, docker-compose.yml, Dockerfile,
+# .dockerignore, .github/, docs/openapi.json, go.mod, go.sum.

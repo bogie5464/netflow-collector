@@ -1,0 +1,392 @@
+[
+  {
+    "id": "E1-T1",
+    "title": "Scaffold domain model, ports, config and binary",
+    "epic": "01-ingest-core",
+    "dependencies": [],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `go build -o bin/collector ./cmd/collector` runs THE SYSTEM SHALL exit 0 and produce an executable at `bin/collector`.",
+      "WHEN `./bin/collector -version` runs THE SYSTEM SHALL exit 0 and print a line beginning `netflow-collector `.",
+      "WHEN `./bin/collector -validate-config` runs with `NFC_SINKS=nope` THE SYSTEM SHALL exit with code 2 and write a message containing `NFC_SINKS` to stderr.",
+      "WHEN a `.env` file exists at or above the working directory THE SYSTEM SHALL load its keys before parsing configuration and SHALL NOT overwrite a variable already exported in the shell.",
+      "WHEN `go test ./internal/config/... ./internal/flow/...` runs THE SYSTEM SHALL exit 0 with 0 failures.",
+      "WHEN `go vet ./...` runs THE SYSTEM SHALL exit 0."
+    ],
+    "verify": [
+      "go build -o bin/collector ./cmd/collector",
+      "./bin/collector -version | grep -qE '^netflow-collector '",
+      "env NFC_SINKS=nope ./bin/collector -validate-config >/tmp/nfc-step1.err 2>&1; test $? -eq 2",
+      "grep -q 'NFC_SINKS' /tmp/nfc-step1.err",
+      "go test ./internal/config/... ./internal/flow/...",
+      "go vet ./..."
+    ],
+    "checkpoint": "step-01-scaffold",
+    "files": [
+      "internal/flow/flow.go",
+      "internal/flow/ports.go",
+      "internal/config/config.go",
+      "internal/config/config_test.go",
+      "cmd/collector/main.go"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T2",
+    "title": "Add NetFlow v5/v9/IPFIX UDP source",
+    "epic": "01-ingest-core",
+    "dependencies": ["E1-T1"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN a NetFlow v5 datagram carrying 2 flow records is sent to the listener's UDP port THE SYSTEM SHALL emit exactly 2 records on the output channel with `flow_type` `netflow5`.",
+      "WHEN a v5 record is decoded THE SYSTEM SHALL reproduce the `srcaddr`, `dstaddr`, `srcport`, `dstport`, `prot`, `dPkts` and `dOctets` values that the test encoded into the datagram.",
+      "WHEN a datagram shorter than the 24-byte NetFlow v5 header arrives THE SYSTEM SHALL increment `netflow_packets_decode_errors_total{source=\"netflow\"}`, emit no record, and keep listening.",
+      "WHEN the context passed to `Start` is cancelled THE SYSTEM SHALL close its UDP socket and return within 1 second with a nil error.",
+      "WHEN `internal/flow/ports.go` is inspected THE SYSTEM SHALL contain no reference to `net.Conn`, `net.Addr` or `net.PacketConn`, so a non-network adapter can implement `Source` unchanged."
+    ],
+    "verify": [
+      "go test -race ./internal/source/netflow/...",
+      "test -f internal/flow/ports.go",
+      "! grep -qE '\\bnet\\.(Conn|Addr|PacketConn)\\b' internal/flow/ports.go",
+      "go vet ./...",
+      "go tool golangci-lint run ./..."
+    ],
+    "checkpoint": "step-02-netflow-source",
+    "files": [
+      "internal/source/netflow/netflow.go",
+      "internal/source/netflow/decode.go",
+      "internal/source/netflow/netflow_test.go"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T3",
+    "title": "Add bounded ingest pipeline with drop accounting",
+    "epic": "01-ingest-core",
+    "dependencies": ["E1-T1"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN a source offers more records than the bounded channel can hold and every sink is blocked THE SYSTEM SHALL drop the excess, increment `netflow_records_dropped_total{reason=\"buffer_full\"}` once per dropped record, and never block the sending source.",
+      "WHEN 10000 records are offered to a pipeline whose sink accepts instantly THE SYSTEM SHALL write 10000 records and report `netflow_records_dropped_total` of 0.",
+      "WHEN pending records reach `NFC_BATCH_SIZE` THE SYSTEM SHALL flush a batch of exactly that size, and WHEN `NFC_BATCH_INTERVAL` elapses with a partial batch THE SYSTEM SHALL flush the partial batch.",
+      "WHEN two sinks are configured and one returns an error THE SYSTEM SHALL still deliver the batch to the other, increment `netflow_batch_write_errors_total` for the failing sink label, and keep running.",
+      "WHEN the pipeline's context is cancelled THE SYSTEM SHALL flush the pending partial batch to every sink before returning.",
+      "WHEN a load of records passes through the pipeline THE SYSTEM SHALL satisfy `ingested_total + dropped_total == offered` with no record unaccounted for."
+    ],
+    "verify": [
+      "go test -race ./internal/pipeline/... ./internal/obs/...",
+      "go vet ./...",
+      "go tool golangci-lint run ./..."
+    ],
+    "checkpoint": "step-03-pipeline",
+    "files": [
+      "internal/obs/metrics.go",
+      "internal/pipeline/pipeline.go",
+      "internal/pipeline/pipeline_test.go"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T4",
+    "title": "Add Postgres/TimescaleDB backend and conformance suite",
+    "epic": "01-ingest-core",
+    "dependencies": ["E1-T3"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `Migrate` runs against an empty PostgreSQL/TimescaleDB database THE SYSTEM SHALL create the `exporters` and `flow_records` tables and convert `flow_records` into a hypertable partitioned on `received_at`, and a second run SHALL change nothing and exit 0.",
+      "WHEN `sinktest.Conformance` runs against the Postgres backend THE SYSTEM SHALL pass all six conformance assertions with 0 failures.",
+      "WHEN a batch is written and then queried over its time range THE SYSTEM SHALL return every record with every field equal to the value written, comparing timestamps at microsecond precision.",
+      "WHEN a batch whose records carry a non-nil `DedupKey` is written twice THE SYSTEM SHALL leave the `flow_records` row count unchanged.",
+      "WHEN a batch whose records carry a nil `DedupKey` is written twice THE SYSTEM SHALL double the `flow_records` row count, preserving append-only semantics on the UDP path.",
+      "WHEN 25 records are paged with a limit of 10 THE SYSTEM SHALL return them across 3 pages with no record repeated or missing and `HasMore` false on the last page."
+    ],
+    "verify": [
+      "go test -race -run TestPostgres ./internal/sink/postgres/...",
+      "grep -q 'timescale/timescaledb:2.30.1-pg17' docker-compose.yml",
+      "grep -q 'timescale/timescaledb:2.30.1-pg17' internal/sink/sinktest/conformance.go",
+      "go vet ./...",
+      "go tool golangci-lint run ./..."
+    ],
+    "checkpoint": "step-04-postgres-backend",
+    "files": [
+      "migrations/postgres/00001_flow_schema.sql",
+      "migrations/embed.go",
+      "internal/sink/postgres/postgres.go",
+      "internal/sink/sinktest/conformance.go",
+      "internal/sink/postgres/postgres_test.go"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T5",
+    "title": "Wire the UDP to Postgres vertical slice",
+    "epic": "01-ingest-core",
+    "dependencies": ["E1-T2", "E1-T4"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN the collector starts with `NFC_SOURCES=netflow` and `NFC_SINKS=postgres` against a live TimescaleDB THE SYSTEM SHALL apply migrations at boot and then listen on `NFC_NETFLOW_ADDR`.",
+      "WHEN a NetFlow v5 datagram containing 1 flow record is sent to that port THE SYSTEM SHALL make the record retrievable through `Querier.Query` within 5 seconds.",
+      "WHEN `NFC_SINKS` names a backend the binary does not implement THE SYSTEM SHALL exit with code 2 and name the unknown backend in its message.",
+      "WHEN the process receives SIGTERM THE SYSTEM SHALL stop its sources, flush pending batches, close every backend, and exit 0 within 10 seconds.",
+      "WHEN migrations fail at boot THE SYSTEM SHALL exit with code 3 without binding any listener."
+    ],
+    "verify": [
+      "go build -o bin/collector ./cmd/collector",
+      "go test -race -run TestVerticalSlice ./internal/app/...",
+      "env NFC_SINKS=nosuchdb ./bin/collector -validate-config >/tmp/nfc-step5.err 2>&1; test $? -eq 2",
+      "grep -q 'nosuchdb' /tmp/nfc-step5.err",
+      "./bin/collector -version | grep -qE '^netflow-collector '"
+    ],
+    "checkpoint": "step-05-vertical-slice",
+    "files": [
+      "internal/app/run.go",
+      "cmd/collector/main.go",
+      "internal/app/e2e_udp_postgres_test.go"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T6",
+    "title": "Add MariaDB backend passing the same suite",
+    "epic": "01-ingest-core",
+    "dependencies": ["E1-T5"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `sinktest.Conformance` runs against the MariaDB backend THE SYSTEM SHALL pass all six assertions with 0 failures, using the same suite source file as the Postgres backend with no MariaDB-specific branch inside it.",
+      "WHEN `internal/sink/sinktest/conformance.go` is compared against its committed state at tag `step-04-postgres-backend` THE SYSTEM SHALL report no difference.",
+      "WHEN `Migrate` runs against an empty MariaDB database THE SYSTEM SHALL create `exporters` and `flow_records` with a unique index on `(received_at, dedup_key)`, and a second run SHALL change nothing and exit 0.",
+      "WHEN a record carrying an IPv6 `src_addr` is written and read back through the MariaDB backend THE SYSTEM SHALL return the same address unchanged.",
+      "WHEN `NFC_SINKS=postgres,mariadb` THE SYSTEM SHALL fan each batch out to both backends and record `netflow_batch_write_duration_seconds` separately per sink label."
+    ],
+    "verify": [
+      "go test -race -run TestMariaDB ./internal/sink/mariadb/...",
+      "git diff --quiet step-04-postgres-backend -- internal/sink/sinktest/conformance.go",
+      "grep -q 'mariadb:11.8.9' docker-compose.yml",
+      "grep -q 'mariadb:11.8.9' internal/sink/mariadb/mariadb_test.go",
+      "go test -race ./internal/sink/..."
+    ],
+    "checkpoint": "step-06-mariadb-backend",
+    "files": [
+      "migrations/mariadb/00001_flow_schema.sql",
+      "migrations/embed.go",
+      "internal/sink/mariadb/mariadb.go",
+      "internal/sink/mariadb/mariadb_test.go",
+      "internal/app/run.go"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T7",
+    "title": "Add Kafka source with dedup on write",
+    "epic": "01-ingest-core",
+    "dependencies": ["E1-T6"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN a JSON flow message is produced to `NFC_KAFKA_TOPIC` THE SYSTEM SHALL decode it and emit one record whose fields equal the message's fields.",
+      "WHEN a message is decoded THE SYSTEM SHALL set `ReceivedAt` from the message's `received_at` field, falling back to the Kafka record timestamp, and SHALL NOT use the consumer's wall clock.",
+      "WHEN a message is decoded THE SYSTEM SHALL populate `DedupKey` with a 16-byte digest of `(exporter_addr, first_switched, src_addr, dst_addr, src_port, dst_port, protocol)`.",
+      "WHEN the same message is delivered twice and written through a backend THE SYSTEM SHALL leave the `flow_records` row count unchanged.",
+      "WHEN a message fails to decode THE SYSTEM SHALL increment `netflow_packets_decode_errors_total{source=\"kafka\"}`, commit past it, and keep consuming.",
+      "WHEN the context passed to `Start` is cancelled THE SYSTEM SHALL close the client and return within 5 seconds."
+    ],
+    "verify": [
+      "docker compose up -d --wait redpanda",
+      "go test -race -run TestKafka ./internal/source/kafka/...",
+      "go test -race ./...",
+      "go tool golangci-lint run ./..."
+    ],
+    "checkpoint": "step-07-kafka-source",
+    "files": [
+      "internal/source/kafka/kafka.go",
+      "internal/source/kafka/kafka_test.go",
+      "internal/app/run.go"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T1",
+    "title": "Add REST query API with cursor pagination",
+    "epic": "02-serving-and-operations",
+    "dependencies": ["E1-T7"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `GET /v1/flows` is requested with a valid `start` and `end` THE SYSTEM SHALL return 200 and a body shaped `{\"data\":[...],\"meta\":{\"next_cursor\":...,\"has_more\":...}}`.",
+      "WHEN `start` is missing, or `end` is not strictly after `start` THE SYSTEM SHALL return 422 with `error.code` `validation_error` and a `details` entry naming the offending field.",
+      "WHEN `limit` exceeds 1000 THE SYSTEM SHALL clamp it to 1000 rather than returning an error, and SHALL never return more than 1000 records in one page.",
+      "WHEN a `cursor` from a previous response is replayed THE SYSTEM SHALL return the next page with no record repeated from the previous page, and SHALL return 400 with `error.code` `bad_request` for an undecodable cursor.",
+      "WHEN any request is served THE SYSTEM SHALL set an `X-Request-Id` response header and use the same value as `error.request_id` on error responses.",
+      "WHEN `./bin/collector -dump-openapi` runs THE SYSTEM SHALL emit a document byte-identical to the committed `docs/openapi.json`."
+    ],
+    "verify": [
+      "go test -race ./internal/api/...",
+      "go build -o bin/collector ./cmd/collector",
+      "./bin/collector -dump-openapi > /tmp/nfc-openapi.json",
+      "diff -u docs/openapi.json /tmp/nfc-openapi.json",
+      "go vet ./...",
+      "go tool golangci-lint run ./..."
+    ],
+    "checkpoint": "step-08-query-api",
+    "files": [
+      "internal/api/server.go",
+      "internal/api/flows.go",
+      "internal/api/api_test.go",
+      "internal/app/run.go",
+      "docs/openapi.json"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T2",
+    "title": "Add static API key middleware on /v1",
+    "epic": "02-serving-and-operations",
+    "dependencies": ["E2-T1"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN a request to `/v1/flows` carries no `Authorization` header THE SYSTEM SHALL return 401 with `error.code` `unauthorized` and no flow data.",
+      "WHEN a request carries `Authorization: Bearer <key>` whose key is not listed in `NFC_API_KEYS` THE SYSTEM SHALL return 401 and SHALL compare keys with `crypto/subtle.ConstantTimeCompare`.",
+      "WHEN a request carries a key listed in `NFC_API_KEYS` THE SYSTEM SHALL return 200.",
+      "WHEN `/healthz`, `/readyz` or `/metrics` is requested without a key THE SYSTEM SHALL return its normal response and never 401.",
+      "WHEN a 401 is returned THE SYSTEM SHALL log at `warn` with only the first 6 characters of the presented key and never the whole key.",
+      "WHEN `NFC_API_KEYS` is empty while the API is enabled THE SYSTEM SHALL exit with code 2 at startup naming `NFC_API_KEYS`."
+    ],
+    "verify": [
+      "go test -race ./internal/api/...",
+      "grep -q 'crypto/subtle' internal/api/auth.go",
+      "go build -o bin/collector ./cmd/collector",
+      "env NFC_API_KEYS= ./bin/collector -validate-config >/tmp/nfc-step9.err 2>&1; test $? -eq 2",
+      "grep -q 'NFC_API_KEYS' /tmp/nfc-step9.err"
+    ],
+    "checkpoint": "step-09-api-auth",
+    "files": [
+      "internal/api/auth.go",
+      "internal/api/auth_test.go",
+      "internal/api/server.go"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T3",
+    "title": "Add logging, metrics, tracing and health endpoints",
+    "epic": "02-serving-and-operations",
+    "dependencies": ["E2-T2"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `GET /metrics` is requested THE SYSTEM SHALL return 200 in Prometheus text format containing `netflow_records_ingested_total`, `netflow_records_dropped_total`, `netflow_batch_write_duration_seconds`, `netflow_batch_write_errors_total`, `netflow_pipeline_buffer_length` and `netflow_record_visibility_lag_seconds`.",
+      "WHEN `GET /healthz` is requested while the process is running THE SYSTEM SHALL return 200 regardless of backend state.",
+      "WHEN every configured backend fails its ping THE SYSTEM SHALL return 503 from `GET /readyz` while `GET /healthz` still returns 200.",
+      "WHEN a log line is emitted THE SYSTEM SHALL write single-line JSON carrying `time`, `level`, `msg` and `service`, and SHALL replace any attribute whose key is on the redaction list with `[redacted]`.",
+      "WHEN a batch write completes THE SYSTEM SHALL observe `netflow_record_visibility_lag_seconds` as the difference between write completion and each record's `received_at`.",
+      "WHEN `NFC_OTEL_ENABLED` is false THE SYSTEM SHALL still serve `/metrics` and SHALL NOT attempt to reach an OTLP endpoint."
+    ],
+    "verify": [
+      "go test -race ./internal/obs/... ./internal/api/...",
+      "go build -o bin/collector ./cmd/collector",
+      "go vet ./...",
+      "go tool golangci-lint run ./..."
+    ],
+    "checkpoint": "step-10-observability",
+    "files": [
+      "internal/obs/otel.go",
+      "internal/obs/logging.go",
+      "internal/api/ops.go",
+      "internal/obs/obs_test.go",
+      "internal/app/run.go"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T4",
+    "title": "Add container image and CI pipeline",
+    "epic": "02-serving-and-operations",
+    "dependencies": ["E2-T3"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN `docker compose --profile app build` runs THE SYSTEM SHALL produce an image whose final stage is `gcr.io/distroless/static:nonroot`, which carries a statically linked binary at `/usr/local/bin/collector`, and whose total size is under 20 MB (20971520 bytes) — proving the distroless/static base and CGO_ENABLED=0 actually held rather than trusting the Dockerfile to be right.",
+      "WHEN `docker compose --profile app up -d --wait` runs THE SYSTEM SHALL bring every service to healthy, including the collector's own healthcheck.",
+      "WHEN the running container is queried at `GET /healthz` from the host THE SYSTEM SHALL return 200.",
+      "WHEN `GET /v1/flows` is requested against the running container with no API key THE SYSTEM SHALL return 401.",
+      "WHEN `.github/workflows/ci.yml` is read THE SYSTEM SHALL contain the commands `go vet ./...`, `golangci-lint run`, `go test -race -cover ./...` and `govulncheck`.",
+      "WHEN `.dockerignore` is read THE SYSTEM SHALL contain the lines `blueprints/`, `bin/` and `.git/`."
+    ],
+    "verify": [
+      "docker compose --profile app up -d --build --wait",
+      "test \"$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)\" = 200",
+      "test \"$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/v1/flows?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z')\" = 401",
+      "docker compose --profile app run --rm --entrypoint /usr/local/bin/collector collector -version | grep -qE '^netflow-collector '",
+      "grep -qx 'blueprints/' .dockerignore && grep -qx 'bin/' .dockerignore && grep -qx '.git/' .dockerignore",
+      "for c in 'go vet ./...' 'golangci-lint run' 'go test -race -cover ./...' 'govulncheck'; do grep -qF \"$c\" .github/workflows/ci.yml || exit 1; done",
+      "test \"$(docker image inspect \"$(docker compose --profile app images -q collector)\" --format '{{.Size}}')\" -lt 20971520"
+    ],
+    "checkpoint": "step-11-deployment",
+    "files": [
+      "Dockerfile",
+      ".dockerignore",
+      ".github/workflows/ci.yml",
+      "cmd/collector/main.go"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T5",
+    "title": "Write README, architecture, runbook and extension docs",
+    "epic": "02-serving-and-operations",
+    "dependencies": ["E2-T4"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN `README.md` is read THE SYSTEM SHALL contain the literal commands `go build -o bin/collector ./cmd/collector`, `docker compose up -d --wait`, `go test -race ./...` and `go mod edit -module`.",
+      "WHEN `docs/architecture.md` is read THE SYSTEM SHALL contain an ASCII diagram of Source to bounded channel to batcher to worker pool to Sink fan-out, and a section headed `## Boundaries`.",
+      "WHEN `docs/runbook.md` is read THE SYSTEM SHALL contain the sections `## netflow_records_dropped_total is climbing`, `## a sink is falling behind` and `## ingest has stopped`, and every `##` section SHALL contain at least one fenced command block.",
+      "WHEN `docs/extending.md` is read THE SYSTEM SHALL contain sections `## Adding a Source` and `## Adding a Sink`, and the Sink section SHALL list the five required artefacts: implementation, conformance test, migration directory, docker-compose service and docs entry.",
+      "WHEN `docs/runbook.md` is read THE SYSTEM SHALL record the goflow2 v2-versus-v3 watch item as an operational item.",
+      "WHEN `docs/deploy.md` is read THE SYSTEM SHALL contain the word `rollback`, proving the image build, compose and rollback procedure it is supposed to document actually got written rather than left as an empty file."
+    ],
+    "verify": [
+      "grep -qF 'go build -o bin/collector ./cmd/collector' README.md && grep -qF 'go mod edit -module' README.md && grep -qF 'docker compose up -d --wait' README.md && grep -qF 'go test -race ./...' README.md",
+      "grep -qxF '## Boundaries' docs/architecture.md",
+      "grep -qxF '## Adding a Source' docs/extending.md && grep -qxF '## Adding a Sink' docs/extending.md",
+      "grep -qxF '## netflow_records_dropped_total is climbing' docs/runbook.md && grep -qxF '## a sink is falling behind' docs/runbook.md && grep -qxF '## ingest has stopped' docs/runbook.md",
+      "grep -qF 'goflow2' docs/runbook.md",
+      "awk 'BEGIN{s=\"preamble\";c[s]=2} /^## /{s=$0;c[s]=0} /^```/{c[s]++} END{for (k in c) if (c[k]<2) exit 1}' docs/runbook.md",
+      "grep -qF 'rollback' docs/deploy.md"
+    ],
+    "checkpoint": "step-12-documentation",
+    "files": [
+      "README.md",
+      "docs/architecture.md",
+      "docs/runbook.md",
+      "docs/extending.md",
+      "docs/deploy.md"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T6",
+    "title": "Add load verification and whole-tree race gate",
+    "epic": "02-serving-and-operations",
+    "dependencies": ["E2-T5"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN the load test offers 200000 synthetic records to the pipeline with an in-memory sink THE SYSTEM SHALL sustain at least 20000 records per second and report 0 drops.",
+      "WHEN the load test offers records faster than a deliberately slow sink accepts them THE SYSTEM SHALL satisfy `ingested + dropped == offered` exactly and SHALL keep the pending buffer at or below `NFC_PIPELINE_BUFFER`.",
+      "WHEN `go test -race ./...` runs across the whole tree THE SYSTEM SHALL exit 0 with 0 failures.",
+      "WHEN `go mod tidy -diff` runs THE SYSTEM SHALL exit 0, proving `go.mod` and `go.sum` are already tidy.",
+      "WHEN `govulncheck ./...` runs THE SYSTEM SHALL exit 0.",
+      "WHEN `docs/performance.md` is read THE SYSTEM SHALL contain the sections `## Measured throughput`, `## Configuration` and `## Machine`."
+    ],
+    "verify": [
+      "go test -tags=load -run TestPipelineLoad ./internal/pipeline/...",
+      "go test -race ./...",
+      "go mod tidy -diff",
+      "go run golang.org/x/vuln/cmd/govulncheck@latest ./...",
+      "grep -qxF '## Measured throughput' docs/performance.md && grep -qxF '## Configuration' docs/performance.md && grep -qxF '## Machine' docs/performance.md",
+      "grep -qF 'nightly' .github/workflows/ci.yml"
+    ],
+    "checkpoint": "step-13-load-verification",
+    "files": [
+      "internal/pipeline/load_test.go",
+      "docs/performance.md",
+      ".github/workflows/ci.yml"
+    ],
+    "status": "pending"
+  }
+]

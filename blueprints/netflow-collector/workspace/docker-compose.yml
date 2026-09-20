@@ -1,0 +1,114 @@
+# Local service stack. THIS FILE OWNS the image tags, the host ports, and the database
+# credentials — every other artefact that names one of them copies it from here
+# (blueprint.md §19.6, Cross-artifact value reconciliation).
+#
+#   docker compose up -d --wait            # infra only; the collector is behind the `app` profile
+#   docker compose --profile app up -d --build --wait
+#   docker compose down                    # stop, keep volumes
+#   docker compose down -v                 # stop and DESTROY data (denied in .claude/settings.json)
+#
+# Every service has a healthcheck so `--wait` returns only once it accepts connections, instead
+# of racing the first test.
+name: netflow-collector
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.30.1-pg17
+    environment:
+      POSTGRES_DB: netflow
+      POSTGRES_USER: netflow
+      POSTGRES_PASSWORD: netflow
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netflow -d netflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  mariadb:
+    image: mariadb:11.8.9
+    environment:
+      MARIADB_DATABASE: netflow
+      MARIADB_USER: netflow
+      MARIADB_PASSWORD: netflow
+      MARIADB_ROOT_PASSWORD: netflow
+    ports:
+      - "127.0.0.1:13306:3306"
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -unetflow -pnetflow --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  redpanda:
+    image: redpandadata/redpanda:v26.1.14
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --overprovisioned
+      - --kafka-addr=PLAINTEXT://0.0.0.0:19092
+      - --advertise-kafka-addr=PLAINTEXT://127.0.0.1:19092
+    ports:
+      - "127.0.0.1:19092:19092"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info -X brokers=127.0.0.1:19092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  collector:
+    # Behind a profile so `docker compose up -d --wait` in §10 Bootstrap starts only the infra
+    # and does not try to build an image before step 11 has written the Dockerfile.
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      mariadb:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    environment:
+      NFC_LOG_LEVEL: "info"
+      NFC_HTTP_ADDR: ":8080"
+      NFC_NETFLOW_ADDR: ":2055"
+      NFC_SOURCES: "netflow"
+      NFC_SINKS: "postgres"
+      NFC_POSTGRES_DSN: "postgres://netflow:netflow@timescaledb:5432/netflow?sslmode=disable"
+      NFC_MARIADB_DSN: "netflow:netflow@tcp(mariadb:3306)/netflow?parseTime=true&loc=UTC&charset=utf8mb4"
+      NFC_RETENTION_DAYS: "30"
+      NFC_KAFKA_BROKERS: "redpanda:19092"
+      NFC_KAFKA_TOPIC: "flows"
+      NFC_KAFKA_GROUP: "netflow-collector"
+      NFC_PIPELINE_BUFFER: "65536"
+      NFC_BATCH_SIZE: "2000"
+      NFC_BATCH_INTERVAL: "1s"
+      NFC_WORKERS: "4"
+      NFC_API_KEYS: "dev-local-key"
+      NFC_OTEL_ENABLED: "false"
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:2055:2055/udp"
+    healthcheck:
+      # distroless has no shell and no curl, so the binary checks itself: `-healthcheck` GETs
+      # /healthz on NFC_HTTP_ADDR and exits 0 or 1.
+      test: ["CMD", "/usr/local/bin/collector", "-healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  timescale-data:
+  mariadb-data:
+  redpanda-data:

@@ -1,7 +1,7 @@
 # NetFlow Collector
 
 [![CI](https://github.com/bogie5464/netflow-collector/actions/workflows/ci.yml/badge.svg)](https://github.com/bogie5464/netflow-collector/actions/workflows/ci.yml)
-[![Coverage](https://raw.githubusercontent.com/bogie5464/netflow-collector/main/.github/badges/coverage.svg)](https://github.com/bogie5464/netflow-collector/actions/workflows/ci.yml)
+[![Coverage](https://github.com/bogie5464/netflow-collector/raw/main/.github/badges/coverage.svg)](https://github.com/bogie5464/netflow-collector/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A single Go daemon that ingests NetFlow v5/v9/IPFIX datagrams and Kafka flow messages, stores

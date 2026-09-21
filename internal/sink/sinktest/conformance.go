@@ -137,7 +137,7 @@ func bySrcPort(rs []flow.FlowRecord) {
 	sort.Slice(rs, func(i, j int) bool { return rs[i].SrcPort < rs[j].SrcPort })
 }
 
-// Conformance runs the six assertions every backend must pass.
+// Conformance runs the assertions every backend must pass.
 func Conformance(t *testing.T, factory Factory) {
 	t.Helper()
 	ctx := context.Background()

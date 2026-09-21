@@ -119,13 +119,14 @@ jobs:
           cache: true
       - name: Load test (no -race, by design)
         run: go test -tags=load -count=1 -v -run TestPipelineLoad ./internal/pipeline/...
-      - name: End-to-end throughput (UDP -> decode -> stub sink, and -> Postgres; no -race)
+      - name: Broker for the kafka sink measurement
+        run: docker compose up -d --wait redpanda
+      - name: End-to-end throughput (UDP -> decode -> stub sink, Postgres, ClickHouse and Kafka; no -race)
         run: go test -tags=load -count=1 -v -timeout 5m -run TestEndToEndUDPThroughput ./internal/app/...
       - name: Postgres insert-path benchmark (no -race)
         run: go test -tags=load -count=1 -v -timeout 10m -run TestInsertPathBenchmark ./internal/sink/postgres/...
       - name: Whole-tree race gate
         run: |
-          docker compose up -d --wait redpanda
           cp .env.example .env
           go test -race -count=1 ./...
           docker compose down

@@ -5,7 +5,7 @@ One process, two pluggable boundaries. Everything else exists to keep those boun
 ## The ingest path
 
 ```
-   exporter (router, switch)              producer (JSON flow messages)
+   exporter (router, switch)              another collector's kafka sink (internal/wire JSON)
           │ UDP datagram                          │ Kafka message
           ▼                                       ▼
    ┌───────────────────┐               ┌────────────────────┐
@@ -31,14 +31,20 @@ One process, two pluggable boundaries. Everything else exists to keep those boun
                  └──────┬─────────────┬─────┘
                         │ WriteBatch  │ WriteBatch     fan-out in parallel, errors per sink
                         ▼             ▼
-              ┌──────────────┐ ┌──────────────┐
-              │ sink/postgres│ │ sink/mariadb │        implements flow.Sink + flow.Querier
-              │ TimescaleDB  │ │ MariaDB      │        ON CONFLICT DO NOTHING / INSERT IGNORE
-              └──────┬───────┘ └──────┬───────┘
-                     └───────┬────────┘
-                             ▼
-                      GET /v1/flows  ──►  Grafana, curl, scripts
+       ┌──────────────┐ ┌──────────────┐ ┌────────────────┐ ┌──────────────┐
+       │ sink/postgres│ │ sink/mariadb │ │ sink/clickhouse│ │ sink/kafka   │
+       │ TimescaleDB  │ │ MariaDB      │ │ ReplacingMT    │ │ produces     │  flow.Sink; the first
+       │ COPY/ON CONF.│ │ INSERT IGNORE│ │ + FINAL        │ │ wire JSON    │  three are also
+       └──────┬───────┘ └──────┬───────┘ └───────┬────────┘ └──────┬───────┘  flow.Backend
+              └───────────────┴─────────┬────────┘                  │
+                                        ▼                           ▼
+                                 GET /v1/flows                another collector's
+                            ──►  Grafana, curl, scripts       source/kafka (central tier)
 ```
+
+The kafka sink and the kafka source speak the same format (`internal/wire`), which is what makes
+one binary both halves of a tiered deployment: an edge tier decodes UDP and produces to a topic; a
+central tier consumes the topic and writes to storage. `docs/deploy.md` has the layout.
 
 Source → bounded channel → batcher → worker pool → Sink fan-out. The invariant with a test:
 `ingested + dropped == offered`.
@@ -55,10 +61,12 @@ constructs one.
 
 NetFlow over UDP is best-effort and never redelivers, so the UDP source leaves `DedupKey` nil.
 Kafka redelivers, so the Kafka source sets `ReceivedAt` from the message (never its own clock) and
-`DedupKey` to a 16-byte digest of the natural key. Both backends carry
-`UNIQUE (received_at, dedup_key)` where NULLs are distinct, and both write with a conflict-tolerant
-insert. A redelivered message therefore collides with itself exactly once; a UDP record never
-collides with anything. No sink knows which source a record came from.
+`DedupKey` to a 16-byte digest of the natural key. Every storage backend gives
+`UNIQUE (received_at, dedup_key)` with NULLs distinct — as an index on Postgres and MariaDB, as a
+`ReplacingMergeTree` sorting key on ClickHouse — and writes conflict-tolerantly. A redelivered
+message therefore collides with itself exactly once; a UDP record never collides with anything. No
+sink knows which source a record came from. The kafka sink does not carry the key at all: it is the
+consuming transport's property, and the kafka source derives it on the way in.
 
 ## Boundaries
 
@@ -69,8 +77,9 @@ code review does.
 |---|---|---|
 | `internal/flow` | stdlib only | anything in this module |
 | `internal/pipeline` | `flow`, `obs` | any concrete source or sink |
-| `internal/source/*` | `flow`, `obs`, `config` | `pipeline`, `api`, any sink |
-| `internal/sink/*` | `flow`, `obs`, `migrations` | `pipeline`, `api`, any source |
+| `internal/wire` | `flow` | anything else — it is the collector's own message format, shared by a source and a sink |
+| `internal/source/*` | `flow`, `obs`, `config`, `wire` | `pipeline`, `api`, any sink |
+| `internal/sink/*` | `flow`, `obs`, `migrations`, `wire` | `pipeline`, `api`, any source |
 | `internal/api` | `flow`, `obs`, `config` | any concrete backend package |
 | `internal/app` | everything | — it is the only wiring layer |
 
@@ -84,8 +93,11 @@ Three rules follow from it:
 3. **A backend passes `sinktest.Conformance` unmodified.** If the suite needs a branch for an
    engine, the interface leaked; fix the backend or the interface, never the suite.
 
-Optional capabilities — such as listing exporters for `GET /v1/exporters` — are discovered by type
-assertion (`api.ExporterLister`), so the contract never widens to make one backend easier.
+Optional capabilities are discovered by type assertion, so the contract never widens to make one
+sink easier: `flow.ExporterLister` serves `GET /v1/exporters`, `flow.Pinger` answers `/readyz` for
+a sink that cannot be queried, and `flow.Backend` itself is an assertion the app makes on each
+`NFC_SINKS` entry — a storage engine gets migrated and queried, a transport like the kafka sink
+only gets written to.
 
 ## Where things live
 
@@ -93,7 +105,8 @@ assertion (`api.ExporterLister`), so the contract never widens to make one backe
 |---|---|
 | Domain types and ports | `internal/flow/flow.go`, `internal/flow/ports.go` |
 | Environment access | `internal/config/config.go` — validated once at boot |
-| Schema | `migrations/postgres/*.sql`, `migrations/mariadb/*.sql`, embedded by `migrations/embed.go` |
+| Schema | `migrations/postgres/*.sql`, `migrations/mariadb/*.sql`, `migrations/clickhouse/*.sql`, embedded by `migrations/embed.go` |
+| Kafka message format | `internal/wire/wire.go` |
 | Storage conformance | `internal/sink/sinktest/conformance.go` |
 | Metric names | `internal/obs/metrics.go` |
 | Logging and redaction | `internal/obs/logging.go` |

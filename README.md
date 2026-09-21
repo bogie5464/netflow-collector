@@ -19,6 +19,9 @@ them side by side, never touches the ingest path, the API, or anything upstream 
   pipeline that drops-and-counts under backpressure instead of blocking an exporter.
 - **Storage:** PostgreSQL/TimescaleDB, MariaDB and ClickHouse, behind one `flow.Backend` contract
   that all three implementations prove with the same conformance suite.
+- **Scale-out:** a Kafka sink and a Kafka source that speak the same format, so the same binary
+  runs as an edge tier (decode UDP, produce) and a central tier (consume, store) — and the topic
+  doubles as replay when a backend is added or rebuilt (`docs/deploy.md`).
 - **Query:** `GET /v1/flows` with a mandatory time range, whitelisted filters and keyset cursor
   pagination, plus `GET /v1/exporters` for fleet inventory.
 - **Testing:** the conformance suite runs against real PostgreSQL, MariaDB and ClickHouse containers
@@ -69,7 +72,7 @@ The full stack, collector included, runs as containers with
 | Vet · lint | `go vet ./...` · `go tool golangci-lint run ./...` |
 | Tests (needs Docker) | `go test -race ./...` |
 | Load test | `go test -tags=load -run TestPipelineLoad ./internal/pipeline/...` (no `-race`) |
-| End-to-end throughput | `go test -tags=load -run TestEndToEndUDPThroughput -v ./internal/app/...` — real UDP + decode into a stub sink, Postgres and ClickHouse, see `docs/performance.md` |
+| End-to-end throughput | `go test -tags=load -run TestEndToEndUDPThroughput -v ./internal/app/...` — real UDP + decode into a stub sink, Postgres, ClickHouse and Kafka, see `docs/performance.md` |
 | Insert-path benchmark | `go test -tags=load -run TestInsertPathBenchmark -v ./internal/sink/postgres/...` — `COPY` vs `unnest`, hypertable vs plain table |
 | OpenAPI document | `./bin/collector -dump-openapi > docs/openapi.json` |
 | Services up · down | `docker compose up -d --wait` · `docker compose down` |
@@ -86,25 +89,26 @@ invalid value exits with code 2 and names the variable.
 | Variable | Meaning |
 |---|---|
 | `NFC_SOURCES` | Comma-separated inputs: `netflow`, `kafka` |
-| `NFC_SINKS` | Comma-separated backends: `postgres`, `mariadb`, `clickhouse` — batches fan out to all of them |
+| `NFC_SINKS` | Comma-separated sinks: `postgres`, `mariadb`, `clickhouse`, `kafka` — batches fan out to all of them |
 | `NFC_NETFLOW_ADDR` · `NFC_HTTP_ADDR` | UDP listen address · API listen address |
 | `NFC_POSTGRES_DSN` · `NFC_MARIADB_DSN` · `NFC_CLICKHOUSE_DSN` | Required only when the backend is in `NFC_SINKS`; the MariaDB DSN must carry `parseTime=true&loc=UTC`; the ClickHouse DSN is the native protocol (`clickhouse://user:pass@host:9000/db`) |
-| `NFC_KAFKA_BROKERS` · `_TOPIC` · `_GROUP` | Required only when `kafka` is in `NFC_SOURCES` |
+| `NFC_KAFKA_BROKERS` · `_TOPIC` · `_GROUP` | Brokers and topic: required when `kafka` is in `NFC_SOURCES` or `NFC_SINKS`; group: only for the source. `kafka` in both is rejected — the topic would feed itself |
 | `NFC_API_KEYS` | Comma-separated bearer keys for `/v1`. Generate with `openssl rand -hex 32`. Empty while the API is enabled is a boot error, never "no key required" |
 | `NFC_PIPELINE_BUFFER` · `NFC_BATCH_SIZE` · `NFC_BATCH_INTERVAL` · `NFC_WORKERS` | Backpressure and batching (defaults 65536 · 2000 · 1s · 4) |
 | `NFC_RETENTION_DAYS` | Age after which flow records are dropped (default 30) |
 | `NFC_LOG_LEVEL` | Logging level |
 
-## Storage backends
+## Sinks
 
 | Backend | Driver | Partitioning | Retention | Notes |
 |---|---|---|---|---|
 | `postgres` (TimescaleDB) | `pgx/v5` | Hypertable on `received_at` | Timescale retention policy (chunk drop) | Recommended default for query-heavy, moderate-volume deployments |
 | `mariadb` | `database/sql` + `go-sql-driver/mysql` | None in v1 | Chunked `DELETE` on an hourly ticker | See the retention caveat in `docs/runbook.md` |
 | `clickhouse` | `clickhouse-go/v2` (native protocol) | `ReplacingMergeTree` partitioned by day | Table `TTL` | Highest ingest rate; dedup is built into the sorting key, see `docs/extending.md` |
+| `kafka` | `franz-go` producer | — (a transport, not storage) | The topic's retention | Feeds another collector's `kafka` source; the edge tier of a tiered deployment |
 
-All three pass `internal/sink/sinktest.Conformance` unmodified. Adding another is a documented
-procedure: `docs/extending.md`.
+The three storage backends pass `internal/sink/sinktest.Conformance` unmodified. Adding another
+sink is a documented procedure: `docs/extending.md`.
 
 ## Process exit codes
 

@@ -55,15 +55,22 @@ go tool golangci-lint run ./...
 | Name | Package | Transport | `ReceivedAt` | `DedupKey` |
 |---|---|---|---|---|
 | `netflow` | `internal/source/netflow` | UDP, NetFlow v5/v9/IPFIX via goflow2 | collector clock | nil (append-only) |
-| `kafka` | `internal/source/kafka` | franz-go consumer group, JSON per message | message `received_at`, else record timestamp | digest of the natural key |
+| `kafka` | `internal/source/kafka` | franz-go consumer group, one `internal/wire` JSON message per record — what the kafka sink produces | message `received_at`, else record timestamp | digest of the natural key |
 
 ## Adding a Sink
 
-A backend implements `flow.Backend`: `WriteBatch(ctx, []FlowRecord) error`,
+A storage backend implements `flow.Backend`: `WriteBatch(ctx, []FlowRecord) error`,
 `Query(ctx, FlowQuery) (FlowResultPage, error)`, `Migrate(ctx) error`, `Close() error`. Nothing
 else. If you want to add a method to the interface, stop — the answer is almost always a private
 helper on your struct, or an optional capability discovered by type assertion (see
-`api.ExporterLister`).
+`flow.ExporterLister` and `flow.Pinger`).
+
+A sink that is a transport rather than storage — the kafka sink, or a future S3/Parquet or
+webhook sink — implements only `flow.Sink` plus `flow.Pinger` (so `/readyz` can see it) and
+`io.Closer`. The app sorts `NFC_SINKS` entries by type assertion: a `flow.Backend` is migrated,
+queried and listed; anything else is only written to. Such a sink skips artefacts 2 and 3 below
+and needs its own tests in place of the conformance suite (`internal/sink/kafka/kafka_test.go`
+consumes what it produced and compares).
 
 Five artefacts, all required:
 
@@ -135,3 +142,4 @@ go tool golangci-lint run ./...
 | `postgres` | `internal/sink/postgres` | PostgreSQL 17 + TimescaleDB | `migrations/postgres/` | `timescaledb` (`127.0.0.1:15432`) | `add_retention_policy` on the hypertable |
 | `mariadb` | `internal/sink/mariadb` | MariaDB 11.8 | `migrations/mariadb/` | `mariadb` (`127.0.0.1:13306`) | chunked `DELETE` on an hourly ticker |
 | `clickhouse` | `internal/sink/clickhouse` | ClickHouse 25.8 | `migrations/clickhouse/` | `clickhouse` (`127.0.0.1:19000`) | table `TTL`, set by `Migrate` from `NFC_RETENTION_DAYS` |
+| `kafka` | `internal/sink/kafka` | any Kafka-protocol broker; produces `internal/wire` JSON, keyed by exporter | — (not storage) | `redpanda` (`127.0.0.1:19092`) | the topic's own retention |

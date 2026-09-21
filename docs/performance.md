@@ -7,6 +7,7 @@ Four layers are measured separately, because each answers a different question:
 | **Collector, wire to sink** (`TestEndToEndUDPThroughputStubSink`) | Real UDP socket, real `goflow2` decode, the real pipeline, a sink that only counts | **~242,000 records/s, zero pipeline drops** |
 | Collector + ClickHouse (`TestEndToEndUDPThroughputClickHouse`) | The same wire path into a real ClickHouse container | **~206,000 records/s durably committed, zero pipeline drops** |
 | Collector + TimescaleDB (`TestEndToEndUDPThroughput`) | The same wire path into a real Postgres/TimescaleDB container | ~56,000 records/s durably committed |
+| Collector + Kafka, the edge tier (`TestEndToEndUDPThroughputKafka`) | The same wire path produced to a single-core dev Redpanda | ~45,000 records/s acknowledged, zero pipeline drops — sender-bound, see below |
 | Pipeline alone (`TestPipelineLoad*`) | In-memory `Offer` to batch to an instant sink; no socket, no decode | ~4,400,000 records/s |
 
 The first row is the collector's capacity: what this binary can take off the wire and hand to a
@@ -20,7 +21,7 @@ All of them are behind the `load` build tag and run **without** `-race` (the det
 an order of magnitude and would fail the floors on correct code):
 
 ```bash
-go test -tags=load -run TestEndToEndUDPThroughput -v ./internal/app/...   # all three end-to-end tests
+go test -tags=load -run TestEndToEndUDPThroughput -v ./internal/app/...   # all four end-to-end tests (kafka needs the compose redpanda)
 go test -tags=load -run TestPipelineLoad ./internal/pipeline/...            # pipeline only
 ```
 
@@ -231,6 +232,36 @@ ClickHouse's native batch insert at 14 ms per 2,000 rows is already ~14× cheape
 Postgres path at its best, which is the difference between a row store maintaining four B-trees
 per insert and a column store appending sorted blocks. The dedup contract cost nothing at write
 time either — `ReplacingMergeTree` collapses redeliveries at merge time and reads use `FINAL`.
+
+## Kafka sink (the edge tier)
+
+Same test, same machine, the kafka sink as the only sink, producing to the compose Redpanda
+(`--smp=1`, a single-core dev broker) with acknowledgement from all in-sync replicas
+(`TestEndToEndUDPThroughputKafka`):
+
+| Metric | Value |
+|---|---|
+| Records acknowledged | ~46,000 records/s |
+| Pipeline drops | **0** |
+| Mean `WriteBatch`, 2,000 records, 4 workers | 51 ms (~40,000 records/s per worker) |
+| Send rate the test managed | ~47,600 datagrams/s |
+| Broker CPU during the run | 5–45% of one core |
+| Test process CPU (sender + collector) | ~370% |
+
+Read the last three rows together: the sender, not the sink, set this number. Four workers at
+51 ms per batch is ~160,000 records/s of sink capacity, more than three times what was offered,
+the pipeline never filled, and the broker was nearly idle. What limited the sender is that it
+shares a process with the collector: producing to Kafka means JSON-encoding and
+Snappy-compressing every record, and those four workers took the cores the sender loop had to
+itself in the stub-sink run. In a real deployment the exporters are other machines; expect the
+edge tier to be bounded by the same UDP read loop as the stub-sink row (~242,000 records/s here),
+with the producer work as the next cost after it.
+
+Every batch waits for the broker's acknowledgement before the worker moves on, so "acknowledged"
+means the same as "committed" does for the databases: on the broker's disk, replicated to the
+in-sync set. The wire format is JSON (`internal/wire`), which is the price of a schema any
+consumer can read without this project's code; at 72-byte flows the message is ~330 bytes, and
+Snappy takes most of that back on the wire.
 
 ## Configuration
 

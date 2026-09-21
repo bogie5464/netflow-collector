@@ -87,9 +87,48 @@ production rollback plan; a bad migration is corrected by a new migration.
 The rollback window is limited only by how long you retain image tags; nothing in the data path
 expires.
 
+## Scaling out: a tiered deployment
+
+One instance is bounded by one UDP read-and-decode loop (`docs/performance.md` has the number).
+Past that, the same binary runs as two tiers with Kafka between them:
+
+```
+ exporters ──UDP──►  edge collector(s)   ──►  Kafka topic  ──►  central collector(s)  ──►  database
+                     NFC_SOURCES=netflow                        NFC_SOURCES=kafka
+                     NFC_SINKS=kafka                            NFC_SINKS=clickhouse (or postgres, …)
+```
+
+```bash
+# edge: decodes, produces, serves /healthz /readyz /metrics — no database, /v1 answers 503
+NFC_SOURCES=netflow NFC_SINKS=kafka NFC_KAFKA_BROKERS=kafka-1:9092,kafka-2:9092 NFC_KAFKA_TOPIC=flows
+
+# central: consumes, stores, serves the API
+NFC_SOURCES=kafka NFC_SINKS=clickhouse NFC_KAFKA_BROKERS=... NFC_KAFKA_TOPIC=flows NFC_KAFKA_GROUP=nfc-central
+```
+
+What the layout buys, and its rules:
+
+- **Split exporters across edge instances, never packets.** NetFlow v9 and IPFIX templates live
+  in the process that received them, keyed by exporter. Point each exporter at exactly one edge
+  instance, or if a UDP load balancer sits in front, hash on source address so an exporter always
+  lands on the same instance.
+- **Central instances scale by consumer group.** Every central instance joins the same
+  `NFC_KAFKA_GROUP`; Kafka assigns partitions among them. The kafka sink keys each message by
+  exporter address, so one exporter's records stay on one partition and arrive in order.
+- **Replay is the reason to keep the topic.** Kafka retention holds the last N days of flows;
+  adding or rebuilding a storage backend means consuming the topic again with a fresh group, not
+  starting from empty. This is what "no vendor lock-in" costs at 3 a.m. — nothing.
+- **Not a durability upgrade on its own.** The pipeline drops under backpressure on every source,
+  and the kafka source commits offsets as it fetches; a central tier whose database is down for
+  longer than its buffer holds loses records like any other instance, and recovers them only by
+  replaying the topic (`docs/runbook.md`).
+- **One instance cannot be both tiers.** `kafka` in both `NFC_SOURCES` and `NFC_SINKS` is a
+  configuration error, because one set of `NFC_KAFKA_*` variables means one topic feeding itself.
+
 ## What is intentionally not here
 
 No Kubernetes manifests, no Helm chart, no cloud-specific modules. The unit of deployment is one
 container with environment variables and two ports; every orchestrator can run that, and the
-operator's existing ingress, monitoring and log pipeline do the rest. Horizontal clustering is out
-of scope for v1 — see `docs/runbook.md` for what saturation looks like and the levers to pull.
+operator's existing ingress, monitoring and log pipeline do the rest. There is no cluster
+membership or coordination between instances; the tiered layout above scales by adding
+independent processes to either tier.

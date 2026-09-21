@@ -44,7 +44,9 @@ goflow2/v2 decoding · franz-go Kafka · slog + OpenTelemetry + Prometheus · Do
 **Ingest path.** exporter UDP datagram → `internal/source/netflow` (implements `flow.Source`) →
 bounded channel in `internal/pipeline` → batcher (size `NFC_BATCH_SIZE` or age `NFC_BATCH_INTERVAL`)
 → worker pool → `WriteBatch` fanned out in parallel to every configured `flow.Sink`
-(`internal/sink/postgres`, `internal/sink/mariadb`, `internal/sink/clickhouse`).
+(`internal/sink/postgres`, `internal/sink/mariadb`, `internal/sink/clickhouse`, `internal/sink/kafka`).
+A sink that is not storage (kafka) is only written to; the app sorts `NFC_SINKS` entries by
+asserting `flow.Backend`.
 
 **Query path.** `GET /v1/flows` → `internal/api/auth.go` middleware → `internal/api/flows.go`
 (validator/v10 over the request struct) → `flow.Querier` → the backend's keyset query → envelope.
@@ -59,8 +61,9 @@ source and never grow the buffer. `ingested + dropped == offered` is an invarian
 |---|---|---|
 | `internal/flow` | stdlib only | anything in this module |
 | `internal/pipeline` | `flow`, `obs` | any concrete source or sink |
-| `internal/source/*` | `flow`, `obs` | `pipeline`, `api`, any sink |
-| `internal/sink/*` | `flow`, `obs`, `migrations` | `pipeline`, `api`, any source |
+| `internal/wire` | `flow` | anything else — the kafka message format, shared by a source and a sink |
+| `internal/source/*` | `flow`, `obs`, `wire` | `pipeline`, `api`, any sink |
+| `internal/sink/*` | `flow`, `obs`, `migrations`, `wire` | `pipeline`, `api`, any source |
 | `internal/api` | `flow`, `obs`, `config` | any concrete backend package |
 | `internal/app` | everything | — it is the only wiring layer |
 
@@ -69,7 +72,8 @@ source and never grow the buffer. `ingested + dropped == offered` is an invarian
 | Concern | Single source of truth |
 |---|---|
 | The two pluggable boundaries | `internal/flow/ports.go` — `Source`, `Sink`, `Querier`, `Backend`, and nothing else |
-| Optional storage capabilities | `internal/flow/exporter.go` — e.g. `ExporterLister`, discovered by type assertion (`backend.(flow.ExporterLister)`). Never added to `Backend` itself |
+| Optional sink capabilities | `internal/flow/exporter.go` (`ExporterLister`), `internal/flow/ready.go` (`Pinger`) — discovered by type assertion, never added to `Sink` or `Backend` |
+| Kafka message format | `internal/wire/wire.go` — produced by `sink/kafka`, consumed by `source/kafka` |
 | Domain types | `internal/flow/flow.go` — `FlowRecord`, `FlowQuery`, `FlowResultPage` |
 | Env access | `internal/config/config.go` — validated once at boot; nothing else reads `os.Getenv`, except `cmd/collector/main.go`'s `-healthcheck` path, which reads `NFC_HTTP_ADDR` directly because it must run before config validation |
 | Schema | `migrations/postgres/*.sql`, `migrations/mariadb/*.sql`, `migrations/clickhouse/*.sql`, embedded by `migrations/embed.go` |
@@ -108,11 +112,12 @@ shell. `.env.example` is committed and stays in sync; `.env` is not.
 | Variable | Required | Used by | Source |
 |---|---|---|---|
 | `NFC_SOURCES` | yes | `internal/app/run.go` | `netflow`, `kafka`, or both |
-| `NFC_SINKS` | yes | `internal/app/run.go` | any of `postgres`, `mariadb`, `clickhouse` |
+| `NFC_SINKS` | yes | `internal/app/run.go` | any of `postgres`, `mariadb`, `clickhouse`, `kafka` |
 | `NFC_POSTGRES_DSN` | if `postgres` enabled | `internal/sink/postgres` | `docker-compose.yml` host port 15432 |
 | `NFC_MARIADB_DSN` | if `mariadb` enabled | `internal/sink/mariadb` | `docker-compose.yml` host port 13306 |
 | `NFC_CLICKHOUSE_DSN` | if `clickhouse` enabled | `internal/sink/clickhouse` | `docker-compose.yml` host port 19000 |
-| `NFC_KAFKA_BROKERS` `_TOPIC` `_GROUP` | if `kafka` enabled | `internal/source/kafka` | `docker-compose.yml` host port 19092 |
+| `NFC_KAFKA_BROKERS` `_TOPIC` | if `kafka` is a source or a sink | `internal/source/kafka`, `internal/sink/kafka` | `docker-compose.yml` host port 19092 |
+| `NFC_KAFKA_GROUP` | if `kafka` is a source | `internal/source/kafka` | `.env.example` |
 | `NFC_API_KEYS` | if the API is enabled | `internal/api/auth.go` | `openssl rand -hex 32` |
 | `NFC_HTTP_ADDR` `NFC_NETFLOW_ADDR` | yes | `internal/app/run.go` | `.env.example` |
 | `NFC_PIPELINE_BUFFER` `NFC_BATCH_SIZE` `NFC_BATCH_INTERVAL` `NFC_WORKERS` | yes (defaulted) | `internal/pipeline` | `.env.example` |

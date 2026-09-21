@@ -45,8 +45,9 @@ NFC_PIPELINE_BUFFER=262144
 docker compose --profile app up -d collector      # a restart is the whole deploy
 ```
 
-If all three are exhausted the instance is saturated: stop pointing more exporters at it. Clustering
-is out of scope for v1; the honest answer is a second instance with its own exporter set.
+If all three are exhausted the instance is saturated. Give it fewer exporters: a second instance
+with its own exporter set, or the tiered layout in `docs/deploy.md` — edge instances that only
+decode and produce to Kafka, central instances that only consume and write.
 
 ## a sink is falling behind
 
@@ -119,9 +120,27 @@ docker compose exec clickhouse clickhouse-client --user netflow --password netfl
   "SELECT count() AS running_merges FROM system.merges WHERE table='flow_records'"
 ```
 
+**Kafka sink (edge tier):** a batch write error here is the broker refusing or timing out an
+acknowledged produce. `UNKNOWN_TOPIC_OR_PARTITION` means the topic does not exist and the cluster
+does not auto-create — create it. `NOT_ENOUGH_REPLICAS` means the topic's `min.insync.replicas`
+cannot be met; the sink requires acknowledgement from all in-sync replicas by design.
+
+```bash
+docker compose exec redpanda rpk topic describe flows -X brokers=127.0.0.1:19092
+docker compose exec redpanda rpk cluster health -X brokers=127.0.0.1:19092
+```
+
 **Recover:** fix the backend, or remove it from `NFC_SINKS` temporarily and restart — the other
 sink continues to receive every batch. Records that were lost to write errors on the failing sink
-are not replayed; the UDP path is best-effort by design. Re-add the sink when it is healthy.
+are not replayed from the collector; the UDP path is best-effort by design. In a tiered deployment
+the topic is the replay: reset the central tier's consumer group to the offset before the outage,
+or run a fresh group against the same topic to rebuild a backend.
+
+```bash
+docker compose exec redpanda rpk group seek nfc-central --to start -X brokers=127.0.0.1:19092   # stop the central tier first
+```
+
+Re-add the sink when it is healthy.
 
 ## ingest has stopped
 

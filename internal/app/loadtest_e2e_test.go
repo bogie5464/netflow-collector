@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync/atomic"
@@ -43,6 +44,18 @@ func TestEndToEndUDPThroughputClickHouse(t *testing.T) {
 	cfg.PostgresEnabled, cfg.ClickHouseEnabled = false, true
 	cfg.ClickHouseDSN = sinktest.StartClickHouse(t)
 	measureAgainst(t, cfg, "clickhouse", "durably ingested (ClickHouse)")
+}
+
+// TestEndToEndUDPThroughputKafka measures the edge tier: the same wire path
+// into the kafka sink, against the compose redpanda broker.
+func TestEndToEndUDPThroughputKafka(t *testing.T) {
+	cfg := testConfig("")
+	cfg.Sinks = []string{config.SinkKafka}
+	cfg.PostgresEnabled = false
+	cfg.KafkaSinkEnabled, cfg.KafkaEnabled = true, true
+	cfg.KafkaBrokers = kafkaBrokers
+	cfg.KafkaTopic = fmt.Sprintf("nfc-load-%d", time.Now().UnixNano())
+	measureAgainst(t, cfg, "kafka", "durably acknowledged (Kafka)")
 }
 
 func measureAgainst(t *testing.T, cfg config.Config, sink, label string) {

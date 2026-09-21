@@ -13,10 +13,18 @@ architecture exists so that this procedure is short.
 
 ## Steps
 
-1. **Read the contract first.** `internal/flow/ports.go`. A backend implements `flow.Backend`:
-   `WriteBatch(ctx, []FlowRecord) error`, `Query(ctx, FlowQuery) (FlowResultPage, error)`,
-   `Migrate(ctx) error`, `Close() error`. Nothing else. If you find yourself wanting to add a method
-   to the interface, stop — the answer is almost always a private helper on your struct.
+1. **Read the contract first.** `internal/flow/ports.go`. A storage backend implements
+   `flow.Backend`: `WriteBatch(ctx, []FlowRecord) error`, `Query(ctx, FlowQuery) (FlowResultPage,
+   error)`, `Migrate(ctx) error`, `Close() error`. Nothing else. If you find yourself wanting to
+   add a method to the interface, stop — the answer is almost always a private helper on your
+   struct, or an optional capability discovered by type assertion (`flow.ExporterLister`,
+   `flow.Pinger`).
+
+   **Decide whether it is storage at all.** A sink nothing can be queried back from — a message
+   bus, object storage, a webhook — implements only `flow.Sink`, `flow.Pinger` (so `/readyz` can
+   see it) and `io.Closer`, skips steps 3–5, and gets its own tests instead of the conformance
+   suite. `internal/sink/kafka` is the shipped example; the app sorts `NFC_SINKS` entries by
+   asserting `flow.Backend`, so nothing else changes.
 
 2. **Create the package.** `internal/sink/<engine>/<engine>.go`, `package <engine>`. Export
    `New(ctx context.Context, dsn string, retentionDays int) (flow.Backend, error)`. Keep every

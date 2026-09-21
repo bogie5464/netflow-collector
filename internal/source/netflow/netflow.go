@@ -26,12 +26,18 @@ const maxDatagram = 65535
 // touches.
 const sourceLabel = "netflow"
 
+// templateSyncTimeout bounds how long Start waits for the template store's
+// replay before binding the socket anyway. A store that cannot be reached
+// must not keep a collector from collecting.
+const templateSyncTimeout = 15 * time.Second
+
 // Source is a NetFlow/IPFIX listener. Create it with New.
 type Source struct {
-	addr string
-	log  *slog.Logger
-	now  func() time.Time
-	dec  *decoder
+	addr  string
+	log   *slog.Logger
+	now   func() time.Time
+	dec   *decoder
+	share *sharing // nil without a TemplateStore
 
 	mu    sync.Mutex
 	local netip.AddrPort
@@ -40,22 +46,41 @@ type Source struct {
 
 var _ flow.Source = (*Source)(nil)
 
+// Option configures a Source beyond what config.Config carries.
+type Option func(*Source)
+
+// WithTemplateStore shares v9/IPFIX templates with every other instance
+// watching the same store. See TemplateStore.
+func WithTemplateStore(store TemplateStore) Option {
+	return func(s *Source) {
+		if store == nil {
+			return
+		}
+		s.share = newSharing(store, s.log)
+		s.dec.newSystem = s.share.system
+	}
+}
+
 // New builds a Source listening on cfg.NetFlowAddr.
-func New(cfg config.Config) (flow.Source, error) {
+func New(cfg config.Config, opts ...Option) (flow.Source, error) {
 	if cfg.NetFlowAddr == "" {
 		return nil, errors.New("netflow: NFC_NETFLOW_ADDR must be set")
 	}
-	return newSource(cfg.NetFlowAddr), nil
+	return newSource(cfg.NetFlowAddr, opts...), nil
 }
 
-func newSource(addr string) *Source {
-	return &Source{
+func newSource(addr string, opts ...Option) *Source {
+	s := &Source{
 		addr:  addr,
 		log:   slog.Default().With("source", sourceLabel),
 		now:   time.Now,
 		dec:   newDecoder(),
 		ready: make(chan struct{}),
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // Ready is closed once the socket is bound; LocalAddr is valid after that.
@@ -72,6 +97,9 @@ func (s *Source) LocalAddr() netip.AddrPort {
 // closes the socket and returns nil. A non-nil return means the listener
 // could not be established.
 func (s *Source) Start(ctx context.Context, out chan<- flow.FlowRecord) error {
+	if s.share != nil {
+		s.startSharing(ctx)
+	}
 	var lc net.ListenConfig
 	conn, err := lc.ListenPacket(ctx, "udp", s.addr)
 	if err != nil {
@@ -134,4 +162,29 @@ func exporterAddr(a net.Addr) netip.Addr {
 		}
 	}
 	return netip.Addr{}
+}
+
+// startSharing begins publishing and watching the template store, and waits
+// for the store's replay so a new instance knows every template before it
+// takes its first datagram. On timeout it listens anyway and keeps watching.
+func (s *Source) startSharing(ctx context.Context) {
+	go s.share.publish(ctx)
+	synced := make(chan struct{})
+	var once sync.Once
+	go func() {
+		err := s.share.store.Watch(ctx,
+			func(key string, value []byte) { s.share.apply(s.dec, key, value) },
+			func() { once.Do(func() { close(synced) }) })
+		if err != nil && ctx.Err() == nil {
+			s.log.Error("template store watch stopped", "err", err)
+		}
+		once.Do(func() { close(synced) })
+	}()
+	select {
+	case <-synced:
+		s.log.Info("templates synced from store")
+	case <-time.After(templateSyncTimeout):
+		s.log.Warn("template store replay did not finish; listening without it", "timeout", templateSyncTimeout)
+	case <-ctx.Done():
+	}
 }

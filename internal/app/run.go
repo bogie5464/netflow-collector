@@ -29,6 +29,7 @@ import (
 	"github.com/bogie5464/netflow-collector/internal/sink/postgres"
 	"github.com/bogie5464/netflow-collector/internal/source/kafka"
 	"github.com/bogie5464/netflow-collector/internal/source/netflow"
+	"github.com/bogie5464/netflow-collector/internal/templatestore"
 )
 
 // Sentinel errors main maps onto the process exit codes: ErrConfig is 2,
@@ -100,12 +101,13 @@ func CheckNames(cfg config.Config) error {
 
 // App is one configured collector. Build it with New, drive it with Run.
 type App struct {
-	cfg      config.Config
-	log      *slog.Logger
-	sinks    map[string]flow.Sink    // every NFC_SINKS entry
-	backends map[string]flow.Backend // the sinks that are also storage: migrated, queried, listed
-	sources  map[string]flow.Source
-	pipe     *pipeline.Pipeline
+	cfg       config.Config
+	log       *slog.Logger
+	sinks     map[string]flow.Sink    // every NFC_SINKS entry
+	backends  map[string]flow.Backend // the sinks that are also storage: migrated, queried, listed
+	sources   map[string]flow.Source
+	templates *templatestore.Kafka // nil unless NFC_KAFKA_TEMPLATE_TOPIC is set
+	pipe      *pipeline.Pipeline
 
 	mu        sync.Mutex
 	listening netip.AddrPort
@@ -141,8 +143,16 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 			a.backends[name] = b
 		}
 	}
+	if cfg.KafkaTemplateTopic != "" && cfg.NetFlowEnabled {
+		store, err := templatestore.NewKafka(ctx, cfg.KafkaBrokers, cfg.KafkaTemplateTopic)
+		if err != nil {
+			a.closeSinks()
+			return nil, fmt.Errorf("%w: template store: %w", ErrMigration, err)
+		}
+		a.templates = store
+	}
 	for _, name := range cfg.Sources {
-		src, err := newSource(name, cfg)
+		src, err := a.newSource(name, cfg)
 		if err != nil {
 			a.closeSinks()
 			return nil, fmt.Errorf("%w: %s: %w", ErrConfig, name, err)
@@ -186,9 +196,12 @@ func newSink(ctx context.Context, name string, cfg config.Config) (flow.Sink, er
 }
 
 // newSource is the source switch: the one place a source package is named.
-func newSource(name string, cfg config.Config) (flow.Source, error) {
+func (a *App) newSource(name string, cfg config.Config) (flow.Source, error) {
 	switch name {
 	case config.SourceNetFlow:
+		if a.templates != nil {
+			return netflow.New(cfg, netflow.WithTemplateStore(a.templates))
+		}
 		return netflow.New(cfg)
 	case config.SourceKafka:
 		return kafka.New(cfg)
@@ -359,6 +372,10 @@ func (a *App) closeSinks() {
 				a.log.Error("close sink failed", "sink", name, "err", err)
 			}
 		}
+	}
+	if a.templates != nil {
+		_ = a.templates.Close()
+		a.templates = nil
 	}
 	// Prevent a double close from a construction failure followed by Run.
 	a.sinks = map[string]flow.Sink{}

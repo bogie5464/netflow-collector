@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"net/http"
@@ -127,4 +128,120 @@ func TestTieredDeployment(t *testing.T) {
 	require.Equal(t, netip.MustParseAddr("127.0.0.1"), got.ExporterAddr, "the exporter is the edge's peer, not the central tier's")
 	require.WithinDuration(t, time.Now(), got.ReceivedAt, time.Minute)
 	require.Len(t, got.DedupKey, 16, "a record that crossed kafka carries the dedup key the UDP path does not")
+}
+
+// TestTieredDeploymentSharesTemplates is the Kubernetes case: two edge
+// instances behind one address, no affinity. A v9 template reaches one
+// instance and the data reaches the other, and the record still comes out
+// of the central tier — because the edge instances share templates through
+// NFC_KAFKA_TEMPLATE_TOPIC.
+func TestTieredDeploymentSharesTemplates(t *testing.T) {
+	stamp := time.Now().UnixNano()
+	topic := fmt.Sprintf("nfc-test-tier-%d", stamp)
+	templates := fmt.Sprintf("nfc-test-templates-%d", stamp)
+
+	edgeCfg := testConfig("")
+	edgeCfg.Sinks = []string{config.SinkKafka}
+	edgeCfg.PostgresEnabled = false
+	edgeCfg.KafkaSinkEnabled, edgeCfg.KafkaEnabled = true, true
+	edgeCfg.KafkaBrokers, edgeCfg.KafkaTopic, edgeCfg.KafkaTemplateTopic = kafkaBrokers, topic, templates
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := New(ctx, edgeCfg)
+		return err == nil
+	}, 30*time.Second, time.Second, "redpanda at %v not reachable", kafkaBrokers)
+	edgeA, stopA := startApp(t, edgeCfg)
+	defer stopA()
+	edgeB, stopB := startApp(t, edgeCfg)
+	defer stopB()
+
+	centralCfg := testConfig(sinktest.StartTimescale(t))
+	centralCfg.Sources = []string{config.SourceKafka}
+	centralCfg.NetFlowEnabled, centralCfg.NetFlowAddr = false, ""
+	centralCfg.KafkaSourceEnabled, centralCfg.KafkaEnabled = true, true
+	centralCfg.KafkaBrokers, centralCfg.KafkaTopic, centralCfg.KafkaGroup = kafkaBrokers, topic, topic+"-group"
+	central, stopCentral := startApp(t, centralCfg)
+	defer stopCentral()
+
+	// The template goes to A only.
+	sendUDP(t, edgeA.NetFlowAddr(), v9TemplateDatagram(5000, 1_758_288_000))
+
+	// The data goes to B only, repeatedly, until B has the template: the
+	// store is asynchronous and B decodes nothing until it arrives.
+	src, dst := netip.MustParseAddr("203.0.113.77"), netip.MustParseAddr("198.51.100.201")
+	querier := central.Backend(config.SinkPostgres)
+	q := flow.FlowQuery{Start: time.Now().Add(-time.Minute), End: time.Now().Add(time.Minute), Limit: 10}
+	var got flow.FlowRecord
+	require.Eventually(t, func() bool {
+		sendUDP(t, edgeB.NetFlowAddr(), v9DataDatagram(6000, 1_758_288_001, src, dst, 51600, 443))
+		page, err := querier.Query(context.Background(), q)
+		if err != nil || len(page.Records) == 0 {
+			return false
+		}
+		got = page.Records[0]
+		return true
+	}, 45*time.Second, 250*time.Millisecond, "instance B must decode with the template instance A received")
+
+	require.Equal(t, flow.FlowTypeNetFlow9, got.FlowType)
+	require.Equal(t, src, got.SrcAddr)
+	require.Equal(t, dst, got.DstAddr)
+	require.Equal(t, uint16(51600), got.SrcPort)
+	require.Equal(t, uint16(443), got.DstPort)
+}
+
+func sendUDP(t *testing.T, to netip.AddrPort, b []byte) {
+	t.Helper()
+	conn, err := net.Dial("udp", to.String())
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	_, err = conn.Write(b)
+	require.NoError(t, err)
+}
+
+// v9 fixtures, built from the wire layout: one template flowset carrying
+// template 256, and one data flowset using it.
+var v9Fields = [][2]uint16{{8, 4}, {12, 4}, {7, 2}, {11, 2}, {4, 1}, {6, 1}, {1, 4}, {2, 4}, {22, 4}, {21, 4}}
+
+func v9Header(count uint16, sysUptime, unixSecs uint32) []byte {
+	b := binary.BigEndian.AppendUint16(nil, 9)
+	b = binary.BigEndian.AppendUint16(b, count)
+	b = binary.BigEndian.AppendUint32(b, sysUptime)
+	b = binary.BigEndian.AppendUint32(b, unixSecs)
+	b = binary.BigEndian.AppendUint32(b, 7)   // sequence
+	b = binary.BigEndian.AppendUint32(b, 100) // source id
+	return b
+}
+
+func v9TemplateDatagram(sysUptime, unixSecs uint32) []byte {
+	b := v9Header(1, sysUptime, unixSecs)
+	b = binary.BigEndian.AppendUint16(b, 0) // flowset id 0 = template
+	b = binary.BigEndian.AppendUint16(b, uint16(4+4+4*len(v9Fields)))
+	b = binary.BigEndian.AppendUint16(b, 256)
+	b = binary.BigEndian.AppendUint16(b, uint16(len(v9Fields)))
+	for _, f := range v9Fields {
+		b = binary.BigEndian.AppendUint16(b, f[0])
+		b = binary.BigEndian.AppendUint16(b, f[1])
+	}
+	return b
+}
+
+func v9DataDatagram(sysUptime, unixSecs uint32, src, dst netip.Addr, srcPort, dstPort uint16) []byte {
+	b := v9Header(1, sysUptime, unixSecs)
+	b = binary.BigEndian.AppendUint16(b, 256)
+	var recLen uint16
+	for _, f := range v9Fields {
+		recLen += f[1]
+	}
+	b = binary.BigEndian.AppendUint16(b, 4+recLen)
+	b = append(b, src.AsSlice()...)
+	b = append(b, dst.AsSlice()...)
+	b = binary.BigEndian.AppendUint16(b, srcPort)
+	b = binary.BigEndian.AppendUint16(b, dstPort)
+	b = append(b, 6, 24)                       // proto, tcp flags
+	b = binary.BigEndian.AppendUint32(b, 9000) // octets
+	b = binary.BigEndian.AppendUint32(b, 12)   // packets
+	b = binary.BigEndian.AppendUint32(b, 1000) // first
+	b = binary.BigEndian.AppendUint32(b, 2500) // last
+	return b
 }

@@ -74,9 +74,9 @@ var (
 
 // startSource runs a listener on an ephemeral port and returns the port and
 // the output channel. The listener is stopped by t.Cleanup.
-func startSource(t *testing.T, now func() time.Time) (*Source, netip.AddrPort, <-chan flow.FlowRecord, func() error) {
+func startSource(t *testing.T, now func() time.Time, opts ...Option) (*Source, netip.AddrPort, <-chan flow.FlowRecord, func() error) {
 	t.Helper()
-	src := newSource("127.0.0.1:0")
+	src := newSource("127.0.0.1:0", opts...)
 	if now != nil {
 		src.now = now
 	}

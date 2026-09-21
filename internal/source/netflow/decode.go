@@ -29,10 +29,17 @@ var errShort = errors.New("datagram shorter than the header")
 type decoder struct {
 	mu        sync.Mutex
 	templates map[netip.Addr]nf.NetFlowTemplateSystem
+	// newSystem builds the template system for an exporter seen for the
+	// first time: goflow2's own, or one that also publishes to a
+	// TemplateStore.
+	newSystem func(exporter netip.Addr) nf.NetFlowTemplateSystem
 }
 
 func newDecoder() *decoder {
-	return &decoder{templates: map[netip.Addr]nf.NetFlowTemplateSystem{}}
+	return &decoder{
+		templates: map[netip.Addr]nf.NetFlowTemplateSystem{},
+		newSystem: func(netip.Addr) nf.NetFlowTemplateSystem { return nf.CreateTemplateSystem() },
+	}
 }
 
 func (d *decoder) templatesFor(exporter netip.Addr) nf.NetFlowTemplateSystem {
@@ -40,7 +47,7 @@ func (d *decoder) templatesFor(exporter netip.Addr) nf.NetFlowTemplateSystem {
 	defer d.mu.Unlock()
 	ts, ok := d.templates[exporter]
 	if !ok {
-		ts = nf.CreateTemplateSystem()
+		ts = d.newSystem(exporter)
 		d.templates[exporter] = ts
 	}
 	return ts

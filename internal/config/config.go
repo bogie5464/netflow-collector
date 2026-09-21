@@ -57,6 +57,10 @@ type Config struct {
 	KafkaBrokers []string `env:"NFC_KAFKA_BROKERS" validate:"required_if=KafkaEnabled true,dive,hostname_port"`
 	KafkaTopic   string   `env:"NFC_KAFKA_TOPIC" validate:"required_if=KafkaEnabled true"`
 	KafkaGroup   string   `env:"NFC_KAFKA_GROUP" validate:"required_if=KafkaSourceEnabled true"`
+	// KafkaTemplateTopic, when set, shares v9/IPFIX templates between every
+	// netflow-source instance through a compacted topic, so exporters can be
+	// spread across instances by any load balancer. Optional.
+	KafkaTemplateTopic string `env:"NFC_KAFKA_TEMPLATE_TOPIC"`
 
 	PipelineBuffer int           `env:"NFC_PIPELINE_BUFFER" envDefault:"65536" validate:"min=1"`
 	BatchSize      int           `env:"NFC_BATCH_SIZE" envDefault:"2000" validate:"min=1"`
@@ -131,11 +135,15 @@ func parse(vars map[string]string) (*Config, error) {
 	cfg.ClickHouseEnabled = slices.Contains(cfg.Sinks, SinkClickHouse)
 	cfg.KafkaSourceEnabled = slices.Contains(cfg.Sources, SourceKafka)
 	cfg.KafkaSinkEnabled = slices.Contains(cfg.Sinks, SinkKafka)
-	cfg.KafkaEnabled = cfg.KafkaSourceEnabled || cfg.KafkaSinkEnabled
+	cfg.KafkaEnabled = cfg.KafkaSourceEnabled || cfg.KafkaSinkEnabled || cfg.KafkaTemplateTopic != ""
 	cfg.NetFlowEnabled = slices.Contains(cfg.Sources, SourceNetFlow)
 
 	if err := newValidator().Struct(&cfg); err != nil {
 		return nil, validationError(err)
+	}
+	if cfg.KafkaTemplateTopic != "" && cfg.KafkaTemplateTopic == cfg.KafkaTopic {
+		return nil, fmt.Errorf("config: %w", &VarError{Var: "NFC_KAFKA_TEMPLATE_TOPIC",
+			Msg: "must differ from NFC_KAFKA_TOPIC: templates and flow records are different streams"})
 	}
 	if cfg.KafkaSourceEnabled && cfg.KafkaSinkEnabled {
 		// One set of NFC_KAFKA_* variables means one topic, and consuming a

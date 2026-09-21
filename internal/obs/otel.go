@@ -49,6 +49,7 @@ func res() *resource.Resource {
 func Prime(sources, sinks []string) {
 	for _, s := range sources {
 		RecordsIngested.WithLabelValues(s)
+		SourceRewinds.WithLabelValues(s)
 	}
 	for _, r := range []string{DropBufferFull, DropShutdown} {
 		RecordsDropped.WithLabelValues(r)

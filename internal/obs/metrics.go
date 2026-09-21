@@ -63,6 +63,14 @@ var (
 	})
 )
 
+// SourceRewinds counts the times a pull source went back to its last
+// acknowledged position because a sink rejected a batch. Every rewind is
+// records delivered again; the sinks that had them dedup.
+var SourceRewinds = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "netflow_source_rewinds_total",
+	Help: "Rewinds of a pull source to its last acknowledged position after a batch write failure, by source.",
+}, []string{"source"})
+
 // Drop reasons used with RecordsDropped.
 const (
 	DropBufferFull = "buffer_full"

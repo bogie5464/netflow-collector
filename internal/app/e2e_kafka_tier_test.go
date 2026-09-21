@@ -245,3 +245,14 @@ func v9DataDatagram(sysUptime, unixSecs uint32, src, dst netip.Addr, srcPort, ds
 	b = binary.BigEndian.AppendUint32(b, 2500) // last
 	return b
 }
+
+// testConfigKafka is the kafka source's configuration against the compose
+// broker, with a group unique to the topic.
+func testConfigKafka(topic string) config.Config {
+	cfg := testConfig("")
+	cfg.Sources = []string{config.SourceKafka}
+	cfg.NetFlowEnabled, cfg.NetFlowAddr = false, ""
+	cfg.KafkaSourceEnabled, cfg.KafkaEnabled = true, true
+	cfg.KafkaBrokers, cfg.KafkaTopic, cfg.KafkaGroup = kafkaBrokers, topic, topic+"-group"
+	return cfg
+}

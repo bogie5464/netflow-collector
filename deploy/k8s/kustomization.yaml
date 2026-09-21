@@ -16,4 +16,4 @@ resources:
 
 images:
   - name: ghcr.io/bogie5464/netflow-collector
-    newTag: v1.3.0
+    newTag: v1.4.0

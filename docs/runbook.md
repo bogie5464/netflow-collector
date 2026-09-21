@@ -131,10 +131,16 @@ docker compose exec redpanda rpk cluster health -X brokers=127.0.0.1:19092
 ```
 
 **Recover:** fix the backend, or remove it from `NFC_SINKS` temporarily and restart — the other
-sink continues to receive every batch. Records that were lost to write errors on the failing sink
-are not replayed from the collector; the UDP path is best-effort by design. In a tiered deployment
-the topic is the replay: reset the central tier's consumer group to the offset before the outage,
-or run a fresh group against the same topic to rebuild a backend.
+sink continues to receive every batch. What a write error costs depends on the source:
+
+- **UDP source (best-effort):** the batch is lost for that sink and is not replayed; nothing on
+  the wire will wait.
+- **Kafka source (at-least-once):** nothing is lost. The source rewinds to its last committed
+  offset and delivers the rejected records again, and `netflow_source_rewinds_total{source="kafka"}`
+  counts each rewind. A rewind storm — the counter climbing steadily — means the sink is rejecting
+  every batch; the consumer is looping on the same records and the group's lag is growing. Fix
+  the sink; nothing needs resetting afterwards. To rebuild a backend from history instead, run a
+  fresh consumer group against the same topic, or seek an existing one back:
 
 ```bash
 docker compose exec redpanda rpk group seek nfc-central --to start -X brokers=127.0.0.1:19092   # stop the central tier first

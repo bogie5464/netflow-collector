@@ -138,10 +138,13 @@ What the layout buys, and its rules:
   only ride-through when the broker is briefly unavailable: ~260 bytes per record, so 2,000,000
   records is ~520 MB and ten seconds at 200,000 flows/s. The shipped default of 65,536 is a third
   of a second.
-- **Not a durability upgrade on its own.** The pipeline drops under backpressure on every source,
-  and the kafka source commits offsets as it fetches; a central tier whose database is down for
-  longer than its buffer holds loses records like any other instance, and recovers them only by
-  replaying the topic (`docs/runbook.md`).
+- **The central tier is at-least-once.** The kafka source is a pull source: the pipeline waits
+  for it instead of dropping, and the source commits a poll's offsets only after every record in
+  it has been written to every sink. If a sink rejects a batch — the database is down, a
+  migration is running — the source rewinds to its last committed offset and delivers again; the
+  sinks that did write those records collapse the duplicates on the dedup key. A database outage
+  therefore costs throughput, never records, for as long as the topic retains them. The edge tier
+  stays best-effort: nothing on a UDP wire will wait.
 - **One instance cannot be both tiers.** `kafka` in both `NFC_SOURCES` and `NFC_SINKS` is a
   configuration error, because one set of `NFC_KAFKA_*` variables means one topic feeding itself.
 

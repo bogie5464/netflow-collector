@@ -52,6 +52,16 @@ layout and the Kubernetes manifests.
 Source → bounded channel → batcher → worker pool → Sink fan-out. The invariant with a test:
 `ingested + dropped == offered`.
 
+That is the push contract, for a source whose wire will not wait. A `flow.PullSource` — the kafka
+source — is run differently: it offers through a `flow.Intake` that blocks for buffer space
+instead of dropping, and every buffered record carries a sequence number in write order. The
+batcher knows each batch's range by counting, workers report each batch's outcome, and a
+watermark advances through the contiguous run of batches written to every sink. `Intake.Written`
+lets the source wait for that watermark before it commits its offsets, and hands it
+`flow.ErrWriteFailed` if a sink rejected a batch in the range — at which point the source rewinds
+and delivers again. Neither the `Source` interface nor any sink changed for this; the sequence
+numbers cost the push path one counter increment.
+
 ## The query path
 
 `GET /v1/flows` → request-id middleware → API key middleware (`/v1` subtree only) → the request
@@ -97,10 +107,11 @@ Three rules follow from it:
    engine, the interface leaked; fix the backend or the interface, never the suite.
 
 Optional capabilities are discovered by type assertion, so the contract never widens to make one
-sink easier: `flow.ExporterLister` serves `GET /v1/exporters`, `flow.Pinger` answers `/readyz` for
-a sink that cannot be queried, and `flow.Backend` itself is an assertion the app makes on each
-`NFC_SINKS` entry — a storage engine gets migrated and queried, a transport like the kafka sink
-only gets written to.
+adapter easier: `flow.ExporterLister` serves `GET /v1/exporters`, `flow.Pinger` answers `/readyz`
+for a sink that cannot be queried, `flow.PullSource` gives a source that can wait the blocking,
+acknowledged intake, and `flow.Backend` itself is an assertion the app makes on each `NFC_SINKS`
+entry — a storage engine gets migrated and queried, a transport like the kafka sink only gets
+written to.
 
 ## Where things live
 

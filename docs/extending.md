@@ -17,6 +17,16 @@ type Source interface {
 It deliberately names no network type. Your adapter owns its wire format, its connection and its
 goroutines; the pipeline owns backpressure.
 
+If your transport can wait and can deliver again from an acknowledged position — a message bus,
+a file, a database being imported — also implement `flow.PullSource`. The pipeline then runs
+`StartPull(ctx, in flow.Intake)` instead: `in.Offer` blocks for buffer space rather than dropping,
+returns a sequence number, and `in.Written(ctx, seq)` returns once every record up to `seq` is
+written to every sink — that is when to acknowledge your transport. `flow.ErrWriteFailed` means a
+sink rejected a batch in the range: rewind to your last acknowledgement and deliver again; the
+sinks that did write those records dedup them, provided your records carry a `DedupKey`.
+`internal/source/kafka` is the reference: it decouples polling from committing through a bounded
+queue so the consumer runs ahead of the commits by at most that much.
+
 1. **Create the package** `internal/source/<name>/<name>.go` and export
    `New(cfg config.Config) (flow.Source, error)`. `Start` blocks until `ctx` is cancelled, releases
    its resources and returns `nil`; a non-nil return means the source failed and the process exits.

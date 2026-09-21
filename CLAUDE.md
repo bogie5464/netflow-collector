@@ -73,7 +73,7 @@ source and never grow the buffer. `ingested + dropped == offered` is an invarian
 | Concern | Single source of truth |
 |---|---|
 | The two pluggable boundaries | `internal/flow/ports.go` — `Source`, `Sink`, `Querier`, `Backend`, and nothing else |
-| Optional sink capabilities | `internal/flow/exporter.go` (`ExporterLister`), `internal/flow/ready.go` (`Pinger`) — discovered by type assertion, never added to `Sink` or `Backend` |
+| Optional capabilities | `internal/flow/exporter.go` (`ExporterLister`), `internal/flow/ready.go` (`Pinger`), `internal/flow/pull.go` (`PullSource`, `Intake`) — discovered by type assertion, never added to `Source`, `Sink` or `Backend` |
 | Kafka message format | `internal/wire/wire.go` — produced by `sink/kafka`, consumed by `source/kafka`; `wire.Format` names the schema |
 | Shared v9/IPFIX templates | `internal/source/netflow/templates.go` (the `TemplateStore` interface and encoding), `internal/templatestore/kafka.go` (the compacted-topic store) |
 | Kubernetes reference layout | `deploy/k8s/` — rendered and validated in CI |
@@ -81,7 +81,7 @@ source and never grow the buffer. `ingested + dropped == offered` is an invarian
 | Env access | `internal/config/config.go` — validated once at boot; nothing else reads `os.Getenv`, except `cmd/collector/main.go`'s `-healthcheck` path, which reads `NFC_HTTP_ADDR` directly because it must run before config validation |
 | Schema | `migrations/postgres/*.sql`, `migrations/mariadb/*.sql`, `migrations/clickhouse/*.sql`, embedded by `migrations/embed.go` |
 | Storage conformance | `internal/sink/sinktest/conformance.go` — every backend passes it unmodified |
-| Metrics | `internal/obs/metrics.go` — instruments are created once, here (`netflow_packets_decode_errors_total` at package scaffold time, the other six with the pipeline) |
+| Metrics | `internal/obs/metrics.go` — instruments are created once, here (`netflow_packets_decode_errors_total` at package scaffold time, six with the pipeline, `netflow_source_rewinds_total` with the pull source) |
 | Image tags, ports, credentials | `docker-compose.yml` |
 
 ## Code rules
@@ -145,8 +145,10 @@ gitignored design bundle; the build it describes is complete).
 
 1. Never widen `Sink`, `Querier` or `Source` to make one backend easier. Two implementations exist
    precisely to stop that.
-2. Never block a source on a slow sink, and never let the pipeline buffer grow past
-   `NFC_PIPELINE_BUFFER`. Drop and count.
+2. Never block a push source on a slow sink, and never let the pipeline buffer grow past
+   `NFC_PIPELINE_BUFFER`. Drop and count. A `flow.PullSource` (kafka) is the deliberate
+   exception: its transport can wait, so the pipeline waits on it and it commits only after
+   `Intake.Written` — see `internal/pipeline/watermark.go`.
 3. Never take `received_at` from the consumer's clock on the Kafka path — redelivery dedup depends
    on it coming from the message.
 4. Never commit secrets, `.env`, or `bin/`. Never log a full API key.

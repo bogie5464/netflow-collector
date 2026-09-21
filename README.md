@@ -16,7 +16,9 @@ procedure (`docs/extending.md`), not a rewrite. Switching backends, or running t
 them side by side, never touches the ingest path, the API, or anything upstream of `flow.Sink`.
 
 - **Ingest:** UDP NetFlow/IPFIX (`goflow2` decoding) and Kafka (`franz-go`), through a bounded
-  pipeline that drops-and-counts under backpressure instead of blocking an exporter.
+  pipeline that drops-and-counts under backpressure instead of blocking an exporter — and that
+  waits for Kafka instead, committing offsets only after every sink has written, so the Kafka
+  path is at-least-once.
 - **Storage:** PostgreSQL/TimescaleDB, MariaDB and ClickHouse, behind one `flow.Backend` contract
   that all three implementations prove with the same conformance suite.
 - **Scale-out:** a Kafka sink and a Kafka source that speak the same format, so the same binary

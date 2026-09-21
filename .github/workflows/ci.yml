@@ -19,9 +19,9 @@ jobs:
     permissions:
       contents: write # only used by the coverage-badge commit step, on pushes to main
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -61,7 +61,7 @@ jobs:
 
       - name: Generate coverage badge
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: emibcn/badge-action@v2.0.2
+        uses: emibcn/badge-action@v2.0.4
         with:
           label: coverage
           status: "${{ steps.coverage.outputs.percentage }}%"
@@ -92,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: gate
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build image
         run: docker compose --profile app build
       - name: Binary in the image under 40 MB
@@ -112,8 +112,8 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true

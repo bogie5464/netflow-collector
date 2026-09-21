@@ -141,6 +141,10 @@ func (s *Server) flows(w http.ResponseWriter, r *http.Request) {
 		p := uint8(*req.Protocol)
 		q.Protocol = &p
 	}
+	if s.querier == nil {
+		writeError(w, r, http.StatusServiceUnavailable, CodeBackendUnavailable, "no queryable storage backend is configured on this instance", nil)
+		return
+	}
 	page, err := s.querier.Query(r.Context(), q)
 	if err != nil {
 		s.log.Error("query failed", "request_id", RequestID(r.Context()), "err", err)
@@ -160,13 +164,13 @@ func (s *Server) exporters(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnprocessableEntity, CodeValidation, "invalid parameters", details)
 		return
 	}
-	names := make([]string, 0, len(s.backends))
-	for name := range s.backends {
+	names := make([]string, 0, len(s.sinks))
+	for name := range s.sinks {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		lister, ok := s.backends[name].(flow.ExporterLister)
+		lister, ok := s.sinks[name].(flow.ExporterLister)
 		if !ok {
 			continue
 		}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	"github.com/bogie5464/netflow-collector/internal/obs"
 	"github.com/bogie5464/netflow-collector/internal/pipeline"
 	"github.com/bogie5464/netflow-collector/internal/sink/clickhouse"
+	kafkasink "github.com/bogie5464/netflow-collector/internal/sink/kafka"
 	"github.com/bogie5464/netflow-collector/internal/sink/mariadb"
 	"github.com/bogie5464/netflow-collector/internal/sink/postgres"
 	"github.com/bogie5464/netflow-collector/internal/source/kafka"
@@ -81,7 +83,7 @@ func CheckNames(cfg config.Config) error {
 	}
 	for _, s := range cfg.Sinks {
 		switch s {
-		case config.SinkPostgres, config.SinkMariaDB, config.SinkClickHouse:
+		case config.SinkPostgres, config.SinkMariaDB, config.SinkClickHouse, config.SinkKafka:
 		default:
 			return fmt.Errorf("%w: NFC_SINKS: backend %q is not implemented by this binary", ErrConfig, s)
 		}
@@ -100,7 +102,8 @@ func CheckNames(cfg config.Config) error {
 type App struct {
 	cfg      config.Config
 	log      *slog.Logger
-	backends map[string]flow.Backend
+	sinks    map[string]flow.Sink    // every NFC_SINKS entry
+	backends map[string]flow.Backend // the sinks that are also storage: migrated, queried, listed
 	sources  map[string]flow.Source
 	pipe     *pipeline.Pipeline
 
@@ -122,29 +125,33 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	a := &App{
 		cfg:      cfg,
 		log:      slog.Default().With("component", "app"),
+		sinks:    map[string]flow.Sink{},
 		backends: map[string]flow.Backend{},
 		sources:  map[string]flow.Source{},
 		ready:    make(chan struct{}),
 	}
 	for _, name := range cfg.Sinks {
-		b, err := newBackend(ctx, name, cfg)
+		s, err := newSink(ctx, name, cfg)
 		if err != nil {
-			a.closeBackends()
+			a.closeSinks()
 			return nil, fmt.Errorf("%w: %s: %w", ErrMigration, name, err)
 		}
-		a.backends[name] = b
+		a.sinks[name] = s
+		if b, ok := s.(flow.Backend); ok {
+			a.backends[name] = b
+		}
 	}
 	for _, name := range cfg.Sources {
 		src, err := newSource(name, cfg)
 		if err != nil {
-			a.closeBackends()
+			a.closeSinks()
 			return nil, fmt.Errorf("%w: %s: %w", ErrConfig, name, err)
 		}
 		a.sources[name] = src
 	}
-	sinks := make([]pipeline.Sink, 0, len(a.backends))
-	for name, b := range a.backends {
-		sinks = append(sinks, pipeline.Sink{Name: name, Sink: b})
+	sinks := make([]pipeline.Sink, 0, len(a.sinks))
+	for name, s := range a.sinks {
+		sinks = append(sinks, pipeline.Sink{Name: name, Sink: s})
 	}
 	pipe, err := pipeline.New(pipeline.Options{
 		BufferSize:    cfg.PipelineBuffer,
@@ -153,15 +160,17 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		Workers:       cfg.Workers,
 	}, sinks...)
 	if err != nil {
-		a.closeBackends()
+		a.closeSinks()
 		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
 	}
 	a.pipe = pipe
 	return a, nil
 }
 
-// newBackend is the sink switch: the one place a backend package is named.
-func newBackend(ctx context.Context, name string, cfg config.Config) (flow.Backend, error) {
+// newSink is the sink switch: the one place a sink package is named. A
+// storage engine returns a flow.Backend; a transport returns a plain
+// flow.Sink, and New sorts them by type assertion.
+func newSink(ctx context.Context, name string, cfg config.Config) (flow.Sink, error) {
 	switch name {
 	case config.SinkPostgres:
 		return postgres.New(ctx, cfg.PostgresDSN, cfg.RetentionDays)
@@ -169,8 +178,10 @@ func newBackend(ctx context.Context, name string, cfg config.Config) (flow.Backe
 		return mariadb.New(ctx, cfg.MariaDBDSN, cfg.RetentionDays)
 	case config.SinkClickHouse:
 		return clickhouse.New(ctx, cfg.ClickHouseDSN, cfg.RetentionDays)
+	case config.SinkKafka:
+		return kafkasink.New(ctx, cfg.KafkaBrokers, cfg.KafkaTopic)
 	default:
-		return nil, fmt.Errorf("%w: unknown backend %q", ErrConfig, name)
+		return nil, fmt.Errorf("%w: unknown sink %q", ErrConfig, name)
 	}
 }
 
@@ -186,8 +197,8 @@ func newSource(name string, cfg config.Config) (flow.Source, error) {
 	}
 }
 
-// Backend returns a constructed backend by its NFC_SINKS name, for tests and
-// for the API layer.
+// Backend returns a constructed storage backend by its NFC_SINKS name, for
+// tests. A sink that is not storage (kafka) is not found here.
 func (a *App) Backend(name string) flow.Backend { return a.backends[name] }
 
 // Ready is closed once every listener is bound.
@@ -217,7 +228,7 @@ func (a *App) NetFlowAddr() netip.AddrPort {
 func (a *App) Run(ctx context.Context) error {
 	for name, b := range a.backends {
 		if err := b.Migrate(ctx); err != nil {
-			a.closeBackends()
+			a.closeSinks()
 			return fmt.Errorf("%w: %s: %w", ErrMigration, name, err)
 		}
 		a.log.Info("migrations applied", "backend", name)
@@ -231,7 +242,7 @@ func (a *App) Run(ctx context.Context) error {
 	if err != nil {
 		stopPipe()
 		<-pipeDone
-		a.closeBackends()
+		a.closeSinks()
 		return err
 	}
 
@@ -277,13 +288,15 @@ func (a *App) Run(ctx context.Context) error {
 	case <-time.After(shutdownTimeout):
 		a.log.Error("pipeline did not drain in time", "timeout", shutdownTimeout)
 	}
-	a.closeBackends()
+	a.closeSinks()
 	a.log.Info("collector stopped")
 	return runErr
 }
 
 // serveHTTP binds NFC_HTTP_ADDR and serves the API. The querier is the first
-// configured sink; every backend is handed over for readiness checks.
+// configured sink that is storage — nil on an edge tier with no database,
+// where /v1 answers 503 and /healthz, /readyz and /metrics still work. Every
+// sink is handed over for readiness checks.
 func (a *App) serveHTTP() (*http.Server, <-chan struct{}, error) {
 	if a.cfg.HTTPAddr == "" {
 		return nil, nil, nil
@@ -305,7 +318,7 @@ func (a *App) serveHTTP() (*http.Server, <-chan struct{}, error) {
 		a.mu.Unlock()
 	}
 	srv := &http.Server{
-		Handler:           api.New(querier, a.backends, a.cfg),
+		Handler:           api.New(querier, a.sinks, a.cfg),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	done := make(chan struct{})
@@ -339,12 +352,15 @@ func (a *App) awaitBound(ctx context.Context, name string, src flow.Source) {
 	}
 }
 
-func (a *App) closeBackends() {
-	for name, b := range a.backends {
-		if err := b.Close(); err != nil {
-			a.log.Error("close backend failed", "backend", name, "err", err)
+func (a *App) closeSinks() {
+	for name, s := range a.sinks {
+		if c, ok := s.(io.Closer); ok {
+			if err := c.Close(); err != nil {
+				a.log.Error("close sink failed", "sink", name, "err", err)
+			}
 		}
 	}
 	// Prevent a double close from a construction failure followed by Run.
+	a.sinks = map[string]flow.Sink{}
 	a.backends = map[string]flow.Backend{}
 }

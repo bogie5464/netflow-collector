@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sort"
 	"sync"
@@ -42,7 +43,7 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 		status  = map[string]string{}
 		healthy = true
 	)
-	for name, b := range s.backends {
+	for name, b := range s.sinks {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -74,12 +75,21 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	writeData(w, map[string]any{"status": "ready", "backends": status}, meta{})
 }
 
-// ping is the cheapest real round-trip the storage contract allows: a
-// one-record query over an empty one-microsecond window.
-func ping(ctx context.Context, q flow.Querier) error {
-	now := time.Now().UTC()
-	_, err := q.Query(ctx, flow.FlowQuery{Start: now.Add(-time.Microsecond), End: now, Limit: 1})
-	return err
+// ping is one readiness round trip. A sink that offers flow.Pinger answers
+// with it; otherwise the cheapest query the storage contract allows — one
+// record over an empty one-microsecond window. A sink that offers neither
+// cannot be shown ready, and saying so is better than guessing.
+func ping(ctx context.Context, s flow.Sink) error {
+	switch v := s.(type) {
+	case flow.Pinger:
+		return v.Ping(ctx)
+	case flow.Querier:
+		now := time.Now().UTC()
+		_, err := v.Query(ctx, flow.FlowQuery{Start: now.Add(-time.Microsecond), End: now, Limit: 1})
+		return err
+	default:
+		return errors.New("sink offers no readiness probe")
+	}
 }
 
 func joinNames(names []string) string {

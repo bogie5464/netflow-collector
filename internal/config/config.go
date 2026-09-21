@@ -28,6 +28,7 @@ const (
 	SinkPostgres   = "postgres"
 	SinkMariaDB    = "mariadb"
 	SinkClickHouse = "clickhouse"
+	SinkKafka      = "kafka"
 )
 
 // maxWalkUp bounds the search for .env so a misplaced working directory cannot
@@ -44,16 +45,18 @@ type Config struct {
 	NetFlowAddr string `env:"NFC_NETFLOW_ADDR" validate:"omitempty,hostname_port"`
 
 	Sources []string `env:"NFC_SOURCES" validate:"dive,oneof=netflow kafka"`
-	Sinks   []string `env:"NFC_SINKS" validate:"dive,oneof=postgres mariadb clickhouse"`
+	Sinks   []string `env:"NFC_SINKS" validate:"dive,oneof=postgres mariadb clickhouse kafka"`
 
 	PostgresDSN   string `env:"NFC_POSTGRES_DSN" validate:"required_if=PostgresEnabled true"`
 	MariaDBDSN    string `env:"NFC_MARIADB_DSN" validate:"required_if=MariaDBEnabled true"`
 	ClickHouseDSN string `env:"NFC_CLICKHOUSE_DSN" validate:"required_if=ClickHouseEnabled true"`
 	RetentionDays int    `env:"NFC_RETENTION_DAYS" envDefault:"30" validate:"min=1"`
 
+	// Brokers and topic serve the kafka source and the kafka sink alike; the
+	// consumer group only the source.
 	KafkaBrokers []string `env:"NFC_KAFKA_BROKERS" validate:"required_if=KafkaEnabled true,dive,hostname_port"`
 	KafkaTopic   string   `env:"NFC_KAFKA_TOPIC" validate:"required_if=KafkaEnabled true"`
-	KafkaGroup   string   `env:"NFC_KAFKA_GROUP" validate:"required_if=KafkaEnabled true"`
+	KafkaGroup   string   `env:"NFC_KAFKA_GROUP" validate:"required_if=KafkaSourceEnabled true"`
 
 	PipelineBuffer int           `env:"NFC_PIPELINE_BUFFER" envDefault:"65536" validate:"min=1"`
 	BatchSize      int           `env:"NFC_BATCH_SIZE" envDefault:"2000" validate:"min=1"`
@@ -65,11 +68,13 @@ type Config struct {
 
 	// Derived from Sources and Sinks before validation so the conditional
 	// rules above can be plain required_if tags. Not read from the environment.
-	PostgresEnabled   bool `env:"-"`
-	MariaDBEnabled    bool `env:"-"`
-	ClickHouseEnabled bool `env:"-"`
-	KafkaEnabled      bool `env:"-"`
-	NetFlowEnabled    bool `env:"-"`
+	PostgresEnabled    bool `env:"-"`
+	MariaDBEnabled     bool `env:"-"`
+	ClickHouseEnabled  bool `env:"-"`
+	KafkaSourceEnabled bool `env:"-"`
+	KafkaSinkEnabled   bool `env:"-"`
+	KafkaEnabled       bool `env:"-"` // either role
+	NetFlowEnabled     bool `env:"-"`
 }
 
 // VarError reports one invalid variable. Var is the NFC_* name so the message
@@ -124,11 +129,19 @@ func parse(vars map[string]string) (*Config, error) {
 	cfg.PostgresEnabled = slices.Contains(cfg.Sinks, SinkPostgres)
 	cfg.MariaDBEnabled = slices.Contains(cfg.Sinks, SinkMariaDB)
 	cfg.ClickHouseEnabled = slices.Contains(cfg.Sinks, SinkClickHouse)
-	cfg.KafkaEnabled = slices.Contains(cfg.Sources, SourceKafka)
+	cfg.KafkaSourceEnabled = slices.Contains(cfg.Sources, SourceKafka)
+	cfg.KafkaSinkEnabled = slices.Contains(cfg.Sinks, SinkKafka)
+	cfg.KafkaEnabled = cfg.KafkaSourceEnabled || cfg.KafkaSinkEnabled
 	cfg.NetFlowEnabled = slices.Contains(cfg.Sources, SourceNetFlow)
 
 	if err := newValidator().Struct(&cfg); err != nil {
 		return nil, validationError(err)
+	}
+	if cfg.KafkaSourceEnabled && cfg.KafkaSinkEnabled {
+		// One set of NFC_KAFKA_* variables means one topic, and consuming a
+		// topic into itself would loop every record forever.
+		return nil, fmt.Errorf("config: %w", &VarError{Var: "NFC_SINKS",
+			Msg: "kafka cannot be both a source and a sink of the same topic; run the edge and central tiers as separate instances"})
 	}
 	return &cfg, nil
 }

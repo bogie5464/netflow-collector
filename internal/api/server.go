@@ -31,19 +31,22 @@ const (
 	CodeInternal           = "internal_error"      // 500
 )
 
-// Server holds the handler's dependencies.
+// Server holds the handler's dependencies. querier is nil on an instance
+// with no storage sink (an edge tier writing only to kafka): /v1/flows then
+// answers 503, and the ops endpoints work as usual.
 type Server struct {
-	querier  flow.Querier
-	backends map[string]flow.Backend
-	cfg      config.Config
-	log      *slog.Logger
+	querier flow.Querier
+	sinks   map[string]flow.Sink
+	cfg     config.Config
+	log     *slog.Logger
 }
 
 // New builds the HTTP handler. The /v1 subtree is mounted exactly once,
 // behind the API key middleware; everything registered on the outer mux
-// (the ops endpoints) stays public.
-func New(q flow.Querier, backends map[string]flow.Backend, cfg config.Config) http.Handler {
-	s := &Server{querier: q, backends: backends, cfg: cfg, log: slog.Default().With("component", "api")}
+// (the ops endpoints) stays public. sinks is every configured sink; what
+// each can do for the API is discovered by type assertion.
+func New(q flow.Querier, sinks map[string]flow.Sink, cfg config.Config) http.Handler {
+	s := &Server{querier: q, sinks: sinks, cfg: cfg, log: slog.Default().With("component", "api")}
 	v1 := http.NewServeMux()
 	for _, r := range routes {
 		h := r.handler

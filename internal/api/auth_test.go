@@ -140,6 +140,19 @@ func TestCheckConfig(t *testing.T) {
 
 // --- ops endpoints (registered outside /v1, always public) ---
 
+// pingSink is a write-only sink with a readiness probe, like the kafka sink.
+type pingSink struct {
+	writeOnlySink
+	err error
+}
+
+func (p pingSink) Ping(context.Context) error { return p.err }
+
+// writeOnlySink is a sink with no probe at all.
+type writeOnlySink struct{}
+
+func (writeOnlySink) WriteBatch(context.Context, []flow.FlowRecord) error { return nil }
+
 type pingBackend struct {
 	flow.Backend
 	err   error
@@ -163,7 +176,7 @@ func TestOpsEndpoints(t *testing.T) {
 	down := pingBackend{err: errors.New("connection refused")}
 
 	t.Run("healthz is 200 regardless of backends", func(t *testing.T) {
-		h := New(&fakeQuerier{}, map[string]flow.Backend{"postgres": down, "mariadb": down}, config.Config{APIKeys: []string{goodKey}})
+		h := New(&fakeQuerier{}, map[string]flow.Sink{"postgres": down, "mariadb": down}, config.Config{APIKeys: []string{goodKey}})
 		rr, env := do(h, "/healthz", "")
 		require.Equal(t, http.StatusOK, rr.Code)
 		require.Nil(t, env.Error)
@@ -171,7 +184,7 @@ func TestOpsEndpoints(t *testing.T) {
 	})
 
 	t.Run("readyz is 200 when every backend answers", func(t *testing.T) {
-		h := New(&fakeQuerier{}, map[string]flow.Backend{"postgres": ok, "mariadb": ok}, config.Config{APIKeys: []string{goodKey}})
+		h := New(&fakeQuerier{}, map[string]flow.Sink{"postgres": ok, "mariadb": ok}, config.Config{APIKeys: []string{goodKey}})
 		rr, env := do(h, "/readyz", "")
 		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 		require.Nil(t, env.Error)
@@ -179,7 +192,7 @@ func TestOpsEndpoints(t *testing.T) {
 	})
 
 	t.Run("readyz is 503 when any backend fails while healthz stays 200", func(t *testing.T) {
-		h := New(&fakeQuerier{}, map[string]flow.Backend{"postgres": down, "mariadb": down}, config.Config{APIKeys: []string{goodKey}})
+		h := New(&fakeQuerier{}, map[string]flow.Sink{"postgres": down, "mariadb": down}, config.Config{APIKeys: []string{goodKey}})
 		rr, env := do(h, "/readyz", "")
 		require.Equal(t, http.StatusServiceUnavailable, rr.Code)
 		require.Equal(t, CodeBackendUnavailable, env.Error.Code)
@@ -189,8 +202,33 @@ func TestOpsEndpoints(t *testing.T) {
 		require.Equal(t, http.StatusOK, rr.Code)
 	})
 
+	t.Run("readyz uses Ping on a sink that offers it and cannot be queried", func(t *testing.T) {
+		h := New(nil, map[string]flow.Sink{"kafka": pingSink{}}, config.Config{APIKeys: []string{goodKey}})
+		rr, env := do(h, "/readyz", "")
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		require.Contains(t, string(env.Data), `"kafka":"ok"`)
+
+		h = New(nil, map[string]flow.Sink{"kafka": pingSink{err: errors.New("no brokers")}}, config.Config{APIKeys: []string{goodKey}})
+		rr, _ = do(h, "/readyz", "")
+		require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+		require.NotContains(t, rr.Body.String(), "no brokers")
+	})
+
+	t.Run("readyz reports a sink with no probe as not ready rather than guessing", func(t *testing.T) {
+		h := New(nil, map[string]flow.Sink{"mystery": writeOnlySink{}}, config.Config{APIKeys: []string{goodKey}})
+		rr, _ := do(h, "/readyz", "")
+		require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	})
+
+	t.Run("v1/flows is 503 on an instance with no queryable backend", func(t *testing.T) {
+		h := New(nil, map[string]flow.Sink{"kafka": pingSink{}}, config.Config{APIKeys: []string{goodKey}})
+		rr, env := do(h, "/v1/flows?start=2026-09-19T00:00:00Z&end=2026-09-20T00:00:00Z", "Bearer "+goodKey)
+		require.Equal(t, http.StatusServiceUnavailable, rr.Code, rr.Body.String())
+		require.Equal(t, CodeBackendUnavailable, env.Error.Code)
+	})
+
 	t.Run("readyz gives every backend a 2 s budget", func(t *testing.T) {
-		h := New(&fakeQuerier{}, map[string]flow.Backend{"postgres": pingBackend{delay: 10 * time.Second}}, config.Config{APIKeys: []string{goodKey}})
+		h := New(&fakeQuerier{}, map[string]flow.Sink{"postgres": pingBackend{delay: 10 * time.Second}}, config.Config{APIKeys: []string{goodKey}})
 		started := time.Now()
 		rr, _ := do(h, "/readyz", "")
 		require.Equal(t, http.StatusServiceUnavailable, rr.Code)

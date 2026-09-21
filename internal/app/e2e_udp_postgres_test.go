@@ -184,7 +184,7 @@ func TestVerticalSlice(t *testing.T) {
 	page, err := fresh.Backend(config.SinkPostgres).Query(ctx, q)
 	require.NoError(t, err)
 	require.Len(t, page.Records, 2, "the batch pending at SIGTERM was flushed")
-	fresh.closeBackends()
+	fresh.closeSinks()
 
 	// Port is released.
 	pc, err := net.ListenPacket("udp", addr.String())

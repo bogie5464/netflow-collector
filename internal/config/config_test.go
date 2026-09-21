@@ -146,7 +146,7 @@ func TestValidation(t *testing.T) {
 		wantMsg string
 	}{
 		{"rejects an unknown sink and names NFC_SINKS",
-			append(baseline(), "NFC_SINKS=nope"), "NFC_SINKS", "must be one of postgres, mariadb, clickhouse"},
+			append(baseline(), "NFC_SINKS=nope"), "NFC_SINKS", "must be one of postgres, mariadb, clickhouse, kafka"},
 		{"rejects an unknown source",
 			append(baseline(), "NFC_SOURCES=netflow,carrier-pigeon"), "NFC_SOURCES", "must be one of netflow, kafka"},
 		{"requires the postgres DSN only when postgres is enabled",
@@ -155,6 +155,11 @@ func TestValidation(t *testing.T) {
 			append(baseline(), "NFC_SINKS=postgres,mariadb"), "NFC_MARIADB_DSN", "must be set"},
 		{"requires kafka brokers when kafka is enabled",
 			append(baseline(), "NFC_SOURCES=kafka", "NFC_KAFKA_TOPIC=flows", "NFC_KAFKA_GROUP=g"), "NFC_KAFKA_BROKERS", "must be set"},
+		{"requires kafka brokers and topic for the kafka sink too",
+			[]string{"NFC_SOURCES=netflow", "NFC_SINKS=kafka"}, "NFC_KAFKA_TOPIC", "must be set"},
+		{"rejects kafka as both source and sink: the topic would feed itself",
+			[]string{"NFC_SOURCES=kafka", "NFC_SINKS=kafka", "NFC_KAFKA_BROKERS=127.0.0.1:19092", "NFC_KAFKA_TOPIC=flows", "NFC_KAFKA_GROUP=g"},
+			"NFC_SINKS", "cannot be both a source and a sink"},
 		{"rejects an unknown log level",
 			append(baseline(), "NFC_LOG_LEVEL=loud"), "NFC_LOG_LEVEL", "must be one of"},
 		{"rejects a zero worker count",
@@ -174,6 +179,14 @@ func TestValidation(t *testing.T) {
 		})
 	}
 
+	t.Run("accepts an edge tier: netflow in, kafka out, no consumer group and no database", func(t *testing.T) {
+		cfg, err := load(t.TempDir(), []string{"NFC_SOURCES=netflow", "NFC_SINKS=kafka", "NFC_KAFKA_BROKERS=127.0.0.1:19092", "NFC_KAFKA_TOPIC=flows"})
+		require.NoError(t, err)
+		require.True(t, cfg.KafkaSinkEnabled)
+		require.False(t, cfg.KafkaSourceEnabled)
+		require.True(t, cfg.KafkaEnabled)
+		require.False(t, cfg.PostgresEnabled)
+	})
 	t.Run("accepts a mariadb-only deployment without a postgres DSN", func(t *testing.T) {
 		cfg, err := load(t.TempDir(), []string{"NFC_SINKS=mariadb", "NFC_MARIADB_DSN=netflow:netflow@tcp(127.0.0.1:13306)/netflow"})
 		require.NoError(t, err)

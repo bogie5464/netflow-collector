@@ -108,7 +108,7 @@ func validRange() url.Values {
 	return url.Values{"start": {"2026-09-19T00:00:00Z"}, "end": {"2026-09-20T00:00:00Z"}}
 }
 
-func newHandler(q flow.Querier, backends map[string]flow.Backend) http.Handler {
+func newHandler(q flow.Querier, backends map[string]flow.Sink) http.Handler {
 	return New(q, backends, config.Config{APIKeys: []string{"dev-local-key"}})
 }
 
@@ -283,7 +283,7 @@ func TestExporters(t *testing.T) {
 	label := "core-rtr-1"
 	lister := &fakeLister{exporters: []flow.Exporter{{ID: 3, IPAddress: netip.MustParseAddr("198.51.100.7"), Label: &label,
 		FirstSeenAt: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), LastSeenAt: time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)}}}
-	rr, env := get(t, newHandler(&fakeQuerier{}, map[string]flow.Backend{"postgres": lister}), "/v1/exporters", nil)
+	rr, env := get(t, newHandler(&fakeQuerier{}, map[string]flow.Sink{"postgres": lister}), "/v1/exporters", nil)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.False(t, env.Meta.HasMore)
 	var data []ExporterJSON
@@ -291,11 +291,11 @@ func TestExporters(t *testing.T) {
 	require.Len(t, data, 1)
 	require.Equal(t, "core-rtr-1", *data[0].Label)
 
-	rr, env = get(t, newHandler(&fakeQuerier{}, map[string]flow.Backend{"postgres": &fakeLister{}}), "/v1/exporters", url.Values{"limit": {"5"}})
+	rr, env = get(t, newHandler(&fakeQuerier{}, map[string]flow.Sink{"postgres": &fakeLister{}}), "/v1/exporters", url.Values{"limit": {"5"}})
 	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "no parameters are accepted")
 	require.Equal(t, "limit", env.Error.Details[0].Field)
 
-	rr, env = get(t, newHandler(&fakeQuerier{}, map[string]flow.Backend{"postgres": nopBackend{}}), "/v1/exporters", nil)
+	rr, env = get(t, newHandler(&fakeQuerier{}, map[string]flow.Sink{"postgres": nopBackend{}}), "/v1/exporters", nil)
 	require.Equal(t, http.StatusServiceUnavailable, rr.Code, "a backend without ListExporters is reported, not faked")
 	require.Equal(t, CodeBackendUnavailable, env.Error.Code)
 }

@@ -1,0 +1,15 @@
+# Shared, non-secret settings. Both tiers read this; each tier's Deployment
+# sets the variables that make it a tier (NFC_SOURCES, NFC_SINKS, NFC_KAFKA_GROUP).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netflow-collector
+data:
+  NFC_LOG_LEVEL: "info"
+  NFC_HTTP_ADDR: ":8080"
+  # Replace with your brokers. One topic for flow records, a second,
+  # compacted one for v9/IPFIX templates so edge pods need no affinity.
+  NFC_KAFKA_BROKERS: "kafka-0.kafka:9092,kafka-1.kafka:9092,kafka-2.kafka:9092"
+  NFC_KAFKA_TOPIC: "netflow.flows"
+  NFC_KAFKA_TEMPLATE_TOPIC: "netflow.templates"
+  NFC_RETENTION_DAYS: "30"

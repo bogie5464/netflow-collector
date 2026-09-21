@@ -93,31 +93,51 @@ One instance is bounded by one UDP read-and-decode loop (`docs/performance.md` h
 Past that, the same binary runs as two tiers with Kafka between them:
 
 ```
- exporters ──UDP──►  edge collector(s)   ──►  Kafka topic  ──►  central collector(s)  ──►  database
-                     NFC_SOURCES=netflow                        NFC_SOURCES=kafka
-                     NFC_SINKS=kafka                            NFC_SINKS=clickhouse (or postgres, …)
+ exporters ──UDP──►  one address  ──►  edge collectors    ──►  Kafka topic  ──►  central collectors  ──►  database
+                                        NFC_SOURCES=netflow                        NFC_SOURCES=kafka
+                                        NFC_SINKS=kafka                            NFC_SINKS=clickhouse (or postgres, …)
+                                        NFC_KAFKA_TEMPLATE_TOPIC=…                 NFC_KAFKA_GROUP=…
 ```
 
 ```bash
 # edge: decodes, produces, serves /healthz /readyz /metrics — no database, /v1 answers 503
-NFC_SOURCES=netflow NFC_SINKS=kafka NFC_KAFKA_BROKERS=kafka-1:9092,kafka-2:9092 NFC_KAFKA_TOPIC=flows
+NFC_SOURCES=netflow NFC_SINKS=kafka NFC_KAFKA_BROKERS=kafka-1:9092,kafka-2:9092 \
+  NFC_KAFKA_TOPIC=netflow.flows NFC_KAFKA_TEMPLATE_TOPIC=netflow.templates
 
 # central: consumes, stores, serves the API
-NFC_SOURCES=kafka NFC_SINKS=clickhouse NFC_KAFKA_BROKERS=... NFC_KAFKA_TOPIC=flows NFC_KAFKA_GROUP=nfc-central
+NFC_SOURCES=kafka NFC_SINKS=clickhouse NFC_KAFKA_BROKERS=... NFC_KAFKA_TOPIC=netflow.flows NFC_KAFKA_GROUP=netflow-central
 ```
 
 What the layout buys, and its rules:
 
-- **Split exporters across edge instances, never packets.** NetFlow v9 and IPFIX templates live
-  in the process that received them, keyed by exporter. Point each exporter at exactly one edge
-  instance, or if a UDP load balancer sits in front, hash on source address so an exporter always
-  lands on the same instance.
+- **One address for every exporter.** Routers point at one IP; nothing in their configuration
+  changes when the edge tier scales. The reference Kubernetes manifests below give that address
+  as a `Service`; on bare metal it is anycast or an L4 balancer in front of the edge instances.
+- **Edge instances are interchangeable when they share templates.** NetFlow v9 and IPFIX
+  templates arrive once, from one exporter, at one instance, and every later datagram from that
+  exporter is undecodable without them. `NFC_KAFKA_TEMPLATE_TOPIC` names a compacted topic every
+  edge instance publishes its templates to and consumes on start-up, before binding its socket —
+  so any instance can decode any exporter, a new instance decodes its first datagram, and a
+  replaced one loses nothing. Without it, keep each exporter on one instance (source-address
+  affinity at the balancer) and expect a decode gap until the exporter's next template refresh
+  whenever an exporter moves. v5 has no templates and needs neither.
+- **The exporter's source address must survive the path.** Templates, the `exporters` table and
+  the Kafka partition key are all keyed on it. A balancer that rewrites the source turns every
+  router into the balancer.
 - **Central instances scale by consumer group.** Every central instance joins the same
   `NFC_KAFKA_GROUP`; Kafka assigns partitions among them. The kafka sink keys each message by
   exporter address, so one exporter's records stay on one partition and arrive in order.
+- **The bus is a contract.** Every message carries `"format": "netflow-collector/v1"`
+  (`internal/wire`). Other consumers — a security pipeline, an operations dashboard — read the
+  same topic without this project's code; the schema changes only by adding fields, and a change
+  that would break a reader gets a new format value and a new topic.
 - **Replay is the reason to keep the topic.** Kafka retention holds the last N days of flows;
   adding or rebuilding a storage backend means consuming the topic again with a fresh group, not
-  starting from empty. This is what "no vendor lock-in" costs at 3 a.m. — nothing.
+  starting from empty.
+- **Size the edge buffer for the broker, not the database.** `NFC_PIPELINE_BUFFER` is the edge's
+  only ride-through when the broker is briefly unavailable: ~260 bytes per record, so 2,000,000
+  records is ~520 MB and ten seconds at 200,000 flows/s. The shipped default of 65,536 is a third
+  of a second.
 - **Not a durability upgrade on its own.** The pipeline drops under backpressure on every source,
   and the kafka source commits offsets as it fetches; a central tier whose database is down for
   longer than its buffer holds loses records like any other instance, and recovers them only by
@@ -125,10 +145,32 @@ What the layout buys, and its rules:
 - **One instance cannot be both tiers.** `kafka` in both `NFC_SOURCES` and `NFC_SINKS` is a
   configuration error, because one set of `NFC_KAFKA_*` variables means one topic feeding itself.
 
+## Kubernetes
+
+`deploy/k8s/` is the tiered layout as Kustomize manifests. Edit `config.yaml` (brokers, topics)
+and `secrets.yaml` (API keys, the storage DSN), then:
+
+```bash
+kubectl apply -k deploy/k8s
+kubectl -n netflow get svc netflow-edge     # the one address to put in every exporter's configuration
+```
+
+| Object | What it is | The choices that matter |
+|---|---|---|
+| `Service/netflow-edge` | The one UDP address | `externalTrafficPolicy: Local` preserves the exporter's source address, so only nodes running an edge pod receive traffic — the Deployment spreads pods across nodes, and the balancer must spread across those nodes (MetalLB/Cilium in BGP mode with ECMP on premises; NLB with IP targets or a passthrough LB in the clouds; L2-mode MetalLB funnels everything through one node). `sessionAffinity: ClientIP` is optional once templates are shared, and free. |
+| `Deployment/netflow-edge` + HPA + PDB | Edge tier | Readiness is the bound socket, so a scaled-up pod finishes its template replay before it receives traffic. The HPA is on CPU as a proxy; the honest signal is `netflow_pipeline_buffer_length` through the Prometheus adapter. The pipeline buffer and the memory limit are sized together. |
+| `Deployment/netflow-central` + PDB | Central tier | Scales by replicas alone. `NFC_BATCH_SIZE=20000` because one insert is one ClickHouse part. |
+| `Service/netflow-central` | The query API, `ClusterIP` | Put an ingress in front; the bearer key is the only authentication. |
+
+The image is `ghcr.io/bogie5464/netflow-collector:<tag>`, published for every release by
+`.github/workflows/release.yml` for `linux/amd64` and `linux/arm64`. CI renders and validates the
+manifests on every push (`kustomize build | kubeconform -strict`).
+
 ## What is intentionally not here
 
-No Kubernetes manifests, no Helm chart, no cloud-specific modules. The unit of deployment is one
+No Helm chart and no cloud-specific modules: the Kustomize manifests are a reference layout to
+copy into your own configuration, not a package to depend on. The unit of deployment is one
 container with environment variables and two ports; every orchestrator can run that, and the
 operator's existing ingress, monitoring and log pipeline do the rest. There is no cluster
-membership or coordination between instances; the tiered layout above scales by adding
-independent processes to either tier.
+membership or coordination between instances beyond the template topic; both tiers scale by
+adding independent processes.

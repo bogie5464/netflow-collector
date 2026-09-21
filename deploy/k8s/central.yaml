@@ -1,0 +1,77 @@
+# Central tier: consumes the flow topic as one consumer group and writes to
+# storage. Scales by replica count alone — Kafka assigns partitions. Serves
+# the query API.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netflow-central
+  labels: {app.kubernetes.io/name: netflow-collector, app.kubernetes.io/component: central}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app.kubernetes.io/name: netflow-collector, app.kubernetes.io/component: central}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: netflow-collector, app.kubernetes.io/component: central}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: collector
+          image: ghcr.io/bogie5464/netflow-collector
+          env:
+            - {name: NFC_SOURCES, value: "kafka"}
+            - {name: NFC_SINKS, value: "clickhouse"}
+            - {name: NFC_KAFKA_GROUP, value: "netflow-central"}
+            # ClickHouse wants few, large inserts: one WriteBatch is one
+            # on-disk part (docs/runbook.md).
+            - {name: NFC_BATCH_SIZE, value: "20000"}
+            - {name: NFC_BATCH_INTERVAL, value: "1s"}
+            - {name: NFC_WORKERS, value: "4"}
+            - {name: NFC_PIPELINE_BUFFER, value: "200000"}
+          envFrom:
+            - configMapRef: {name: netflow-collector}
+            - secretRef: {name: netflow-collector}
+          ports:
+            - {name: http, containerPort: 8080, protocol: TCP}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: "1", memory: 256Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+---
+# The query API. Put your ingress in front of this; the bearer key is the
+# only authentication the collector does.
+apiVersion: v1
+kind: Service
+metadata:
+  name: netflow-central
+  labels: {app.kubernetes.io/name: netflow-collector, app.kubernetes.io/component: central}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: netflow-collector, app.kubernetes.io/component: central}
+  ports:
+    - {name: http, port: 8080, targetPort: http, protocol: TCP}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: netflow-central
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: netflow-collector, app.kubernetes.io/component: central}

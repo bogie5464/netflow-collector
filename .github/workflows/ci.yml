@@ -83,6 +83,11 @@ jobs:
       - name: OpenAPI drift
         run: ./bin/collector -dump-openapi > /tmp/openapi.json && diff -u docs/openapi.json /tmp/openapi.json
 
+      - name: Kubernetes manifests render and validate
+        run: |
+          go run sigs.k8s.io/kustomize/kustomize/v5@v5.7.1 build deploy/k8s > /tmp/k8s.yaml
+          go run github.com/yannh/kubeconform/cmd/kubeconform@v0.7.0 -strict -summary -kubernetes-version 1.31.0 /tmp/k8s.yaml
+
       - name: Services down
         if: always()
         run: docker compose down

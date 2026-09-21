@@ -157,8 +157,12 @@ docker compose logs --since 10m collector | grep -E '"level":"(ERROR|WARN)"'
 - **Decode errors climbing, ingest flat:** datagrams arrive but do not decode. For NetFlow v9/IPFIX
   the usual cause is a missing template — templates are sent periodically by the exporter and are
   required before any data set decodes; a collector restarted mid-cycle waits until the next
-  template refresh. Check the exporter's template refresh interval. See the goflow2 watch item below
-  if the errors are against a new exporter model.
+  template refresh. Check the exporter's template refresh interval. With several edge instances
+  behind one address, set `NFC_KAFKA_TEMPLATE_TOPIC` so they share templates; if it is set and
+  the errors persist, check that the topic exists and is compacted (`rpk topic describe`) and
+  look for `template store` warnings in the log — the instance listens anyway after a 15 s
+  replay timeout. See the goflow2 watch item below if the errors are against a new exporter
+  model.
 - **Both flat:** nothing is reaching the port. Verify the listener, the port mapping and the path
   from the exporter.
 

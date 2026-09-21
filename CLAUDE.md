@@ -62,6 +62,7 @@ source and never grow the buffer. `ingested + dropped == offered` is an invarian
 | `internal/flow` | stdlib only | anything in this module |
 | `internal/pipeline` | `flow`, `obs` | any concrete source or sink |
 | `internal/wire` | `flow` | anything else — the kafka message format, shared by a source and a sink |
+| `internal/templatestore` | stdlib, franz-go | anything in this module — it satisfies `netflow.TemplateStore` structurally |
 | `internal/source/*` | `flow`, `obs`, `wire` | `pipeline`, `api`, any sink |
 | `internal/sink/*` | `flow`, `obs`, `migrations`, `wire` | `pipeline`, `api`, any source |
 | `internal/api` | `flow`, `obs`, `config` | any concrete backend package |
@@ -73,7 +74,9 @@ source and never grow the buffer. `ingested + dropped == offered` is an invarian
 |---|---|
 | The two pluggable boundaries | `internal/flow/ports.go` — `Source`, `Sink`, `Querier`, `Backend`, and nothing else |
 | Optional sink capabilities | `internal/flow/exporter.go` (`ExporterLister`), `internal/flow/ready.go` (`Pinger`) — discovered by type assertion, never added to `Sink` or `Backend` |
-| Kafka message format | `internal/wire/wire.go` — produced by `sink/kafka`, consumed by `source/kafka` |
+| Kafka message format | `internal/wire/wire.go` — produced by `sink/kafka`, consumed by `source/kafka`; `wire.Format` names the schema |
+| Shared v9/IPFIX templates | `internal/source/netflow/templates.go` (the `TemplateStore` interface and encoding), `internal/templatestore/kafka.go` (the compacted-topic store) |
+| Kubernetes reference layout | `deploy/k8s/` — rendered and validated in CI |
 | Domain types | `internal/flow/flow.go` — `FlowRecord`, `FlowQuery`, `FlowResultPage` |
 | Env access | `internal/config/config.go` — validated once at boot; nothing else reads `os.Getenv`, except `cmd/collector/main.go`'s `-healthcheck` path, which reads `NFC_HTTP_ADDR` directly because it must run before config validation |
 | Schema | `migrations/postgres/*.sql`, `migrations/mariadb/*.sql`, `migrations/clickhouse/*.sql`, embedded by `migrations/embed.go` |
@@ -118,6 +121,7 @@ shell. `.env.example` is committed and stays in sync; `.env` is not.
 | `NFC_CLICKHOUSE_DSN` | if `clickhouse` enabled | `internal/sink/clickhouse` | `docker-compose.yml` host port 19000 |
 | `NFC_KAFKA_BROKERS` `_TOPIC` | if `kafka` is a source or a sink | `internal/source/kafka`, `internal/sink/kafka` | `docker-compose.yml` host port 19092 |
 | `NFC_KAFKA_GROUP` | if `kafka` is a source | `internal/source/kafka` | `.env.example` |
+| `NFC_KAFKA_TEMPLATE_TOPIC` | optional | `internal/app/run.go` → `internal/templatestore` → `internal/source/netflow` | `.env.example` (empty) |
 | `NFC_API_KEYS` | if the API is enabled | `internal/api/auth.go` | `openssl rand -hex 32` |
 | `NFC_HTTP_ADDR` `NFC_NETFLOW_ADDR` | yes | `internal/app/run.go` | `.env.example` |
 | `NFC_PIPELINE_BUFFER` `NFC_BATCH_SIZE` `NFC_BATCH_INTERVAL` `NFC_WORKERS` | yes (defaulted) | `internal/pipeline` | `.env.example` |

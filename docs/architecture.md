@@ -44,7 +44,10 @@ One process, two pluggable boundaries. Everything else exists to keep those boun
 
 The kafka sink and the kafka source speak the same format (`internal/wire`), which is what makes
 one binary both halves of a tiered deployment: an edge tier decodes UDP and produces to a topic; a
-central tier consumes the topic and writes to storage. `docs/deploy.md` has the layout.
+central tier consumes the topic and writes to storage. Edge instances may also share v9/IPFIX
+templates through a second, compacted topic (`netflow.TemplateStore`, implemented by
+`internal/templatestore`), so any instance can decode any exporter. `docs/deploy.md` has the
+layout and the Kubernetes manifests.
 
 Source → bounded channel → batcher → worker pool → Sink fan-out. The invariant with a test:
 `ingested + dropped == offered`.

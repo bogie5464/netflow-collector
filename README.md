@@ -20,8 +20,10 @@ them side by side, never touches the ingest path, the API, or anything upstream 
 - **Storage:** PostgreSQL/TimescaleDB, MariaDB and ClickHouse, behind one `flow.Backend` contract
   that all three implementations prove with the same conformance suite.
 - **Scale-out:** a Kafka sink and a Kafka source that speak the same format, so the same binary
-  runs as an edge tier (decode UDP, produce) and a central tier (consume, store) — and the topic
-  doubles as replay when a backend is added or rebuilt (`docs/deploy.md`).
+  runs as an edge tier (decode UDP, produce) and a central tier (consume, store); edge instances
+  share v9/IPFIX templates through a compacted topic, so one address serves every exporter with
+  no affinity. Reference Kubernetes manifests in `deploy/k8s`, and the topic doubles as replay
+  when a backend is added or rebuilt (`docs/deploy.md`).
 - **Query:** `GET /v1/flows` with a mandatory time range, whitelisted filters and keyset cursor
   pagination, plus `GET /v1/exporters` for fleet inventory.
 - **Testing:** the conformance suite runs against real PostgreSQL, MariaDB and ClickHouse containers
@@ -93,6 +95,7 @@ invalid value exits with code 2 and names the variable.
 | `NFC_NETFLOW_ADDR` · `NFC_HTTP_ADDR` | UDP listen address · API listen address |
 | `NFC_POSTGRES_DSN` · `NFC_MARIADB_DSN` · `NFC_CLICKHOUSE_DSN` | Required only when the backend is in `NFC_SINKS`; the MariaDB DSN must carry `parseTime=true&loc=UTC`; the ClickHouse DSN is the native protocol (`clickhouse://user:pass@host:9000/db`) |
 | `NFC_KAFKA_BROKERS` · `_TOPIC` · `_GROUP` | Brokers and topic: required when `kafka` is in `NFC_SOURCES` or `NFC_SINKS`; group: only for the source. `kafka` in both is rejected — the topic would feed itself |
+| `NFC_KAFKA_TEMPLATE_TOPIC` | Optional. A compacted topic through which every `netflow`-source instance shares v9/IPFIX templates, so exporters can be spread across instances freely. Created compacted if missing |
 | `NFC_API_KEYS` | Comma-separated bearer keys for `/v1`. Generate with `openssl rand -hex 32`. Empty while the API is enabled is a boot error, never "no key required" |
 | `NFC_PIPELINE_BUFFER` · `NFC_BATCH_SIZE` · `NFC_BATCH_INTERVAL` · `NFC_WORKERS` | Backpressure and batching (defaults 65536 · 2000 · 1s · 4) |
 | `NFC_RETENTION_DAYS` | Age after which flow records are dropped (default 30) |
@@ -137,7 +140,7 @@ go build ./... && go test -race ./...
 - `docs/architecture.md` — the pipeline, the package boundaries, and why they are drawn that way.
 - `docs/extending.md` — adding a source or a storage backend.
 - `docs/runbook.md` — what to do when an alert fires.
-- `docs/deploy.md` — image build, compose, release and rollback.
+- `docs/deploy.md` — image build, compose, the tiered layout, Kubernetes, release and rollback.
 - `docs/openapi.json` — generated API document; never hand-edited.
 
 ## License

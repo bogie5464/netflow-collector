@@ -1,0 +1,124 @@
+# Edge tier: NetFlow in on one address, flow records out to Kafka. No
+# database, so /v1 answers 503; /healthz, /readyz and /metrics work.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netflow-edge
+  labels: {app.kubernetes.io/name: netflow-collector, app.kubernetes.io/component: edge}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app.kubernetes.io/name: netflow-collector, app.kubernetes.io/component: edge}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: netflow-collector, app.kubernetes.io/component: edge}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      # The collector's shutdown budget is 10 s: sources stop, the buffer
+      # drains and flushes to Kafka, then it exits. Give it room.
+      terminationGracePeriodSeconds: 20
+      # Spread across nodes: with externalTrafficPolicy: Local on the
+      # Service, only nodes running an edge pod receive traffic.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app.kubernetes.io/name: netflow-collector, app.kubernetes.io/component: edge}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: collector
+          image: ghcr.io/bogie5464/netflow-collector
+          env:
+            - {name: NFC_SOURCES, value: "netflow"}
+            - {name: NFC_SINKS, value: "kafka"}
+            - {name: NFC_NETFLOW_ADDR, value: ":2055"}
+            # The pipeline buffer is the edge's only ride-through during a
+            # broker hiccup: ~260 bytes per record, so 2,000,000 records is
+            # ~520 MB and, at 200,000 flows/s, ten seconds. Size the memory
+            # limit below to match.
+            - {name: NFC_PIPELINE_BUFFER, value: "2000000"}
+            - {name: NFC_BATCH_SIZE, value: "5000"}
+            - {name: NFC_BATCH_INTERVAL, value: "1s"}
+            - {name: NFC_WORKERS, value: "4"}
+          envFrom:
+            - configMapRef: {name: netflow-collector}
+            - secretRef: {name: netflow-collector}
+          ports:
+            - {name: netflow, containerPort: 2055, protocol: UDP}
+            - {name: http, containerPort: 8080, protocol: TCP}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          readinessProbe:
+            # Not ready until the socket is bound, which with a template
+            # topic means the template replay finished first.
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: "1", memory: 512Mi}
+            limits: {memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+---
+# One address for every exporter's configuration. Two properties matter:
+#
+# externalTrafficPolicy: Local preserves the exporter's source address,
+# which everything keys on (templates, the exporters table, the Kafka
+# partition). Without it, every router looks like the load balancer. It
+# also means traffic only reaches nodes that run an edge pod — spread the
+# pods across nodes (the spread constraint on the Deployment) and use a load balancer that
+# balances across those nodes: MetalLB or Cilium in BGP mode with ECMP on
+# premises; NLB with IP targets or a passthrough LB in the clouds.
+#
+# sessionAffinity: ClientIP keeps an exporter on one pod. With
+# NFC_KAFKA_TEMPLATE_TOPIC set it is optional — any pod can decode any
+# exporter — but it is free and keeps template traffic on the topic low.
+apiVersion: v1
+kind: Service
+metadata:
+  name: netflow-edge
+  labels: {app.kubernetes.io/name: netflow-collector, app.kubernetes.io/component: edge}
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP: {timeoutSeconds: 10800}
+  selector: {app.kubernetes.io/name: netflow-collector, app.kubernetes.io/component: edge}
+  ports:
+    - {name: netflow, port: 2055, targetPort: netflow, protocol: UDP}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: netflow-edge
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: netflow-edge}
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    # CPU is a proxy: decode cost tracks packet rate. The honest signal is
+    # netflow_pipeline_buffer_length or netflow_records_dropped_total from
+    # /metrics, exposed to the HPA through the Prometheus adapter as a Pods
+    # metric; swap this block for that once the adapter is in place.
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 70}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: netflow-edge
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: netflow-collector, app.kubernetes.io/component: edge}

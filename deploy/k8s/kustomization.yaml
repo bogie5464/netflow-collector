@@ -1,0 +1,19 @@
+# Reference layout for a tiered deployment: edge pods take NetFlow on one
+# Service address and produce to Kafka; central pods consume and write to
+# storage. Apply with `kubectl apply -k deploy/k8s` after editing
+# config.yaml and secrets.yaml. docs/deploy.md explains every choice here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: netflow
+
+resources:
+  - namespace.yaml
+  - config.yaml
+  - secrets.yaml
+  - edge.yaml
+  - central.yaml
+
+images:
+  - name: ghcr.io/bogie5464/netflow-collector
+    newTag: v1.3.0

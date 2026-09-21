@@ -1,6 +1,7 @@
 // Package kafka is the Kafka input adapter: a franz-go consumer group that
-// decodes one JSON flow record per message (blueprint §5, "Kafka ingest
-// message schema") and emits flow.FlowRecord values.
+// decodes one internal/wire message per Kafka message and emits
+// flow.FlowRecord values. The kafka sink produces the same format, so this
+// source is the central tier of a tiered deployment (docs/deploy.md).
 //
 // Two rules make redelivery safe without any sink knowing Kafka exists:
 // ReceivedAt comes from the message (or the Kafka record timestamp), never
@@ -13,11 +14,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/netip"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -25,34 +24,13 @@ import (
 	"github.com/bogie5464/netflow-collector/internal/config"
 	"github.com/bogie5464/netflow-collector/internal/flow"
 	"github.com/bogie5464/netflow-collector/internal/obs"
+	"github.com/bogie5464/netflow-collector/internal/wire"
 )
 
 const sourceLabel = "kafka"
 
-// Message is the wire schema: one JSON object per Kafka message, no envelope.
-// Unknown fields are ignored so producers can add fields. next_hop and
-// received_at may be null or absent.
-type Message struct {
-	ExporterAddr  netip.Addr  `json:"exporter_addr"`
-	FlowType      string      `json:"flow_type"`
-	ReceivedAt    *time.Time  `json:"received_at"`
-	FirstSwitched time.Time   `json:"first_switched"`
-	LastSwitched  time.Time   `json:"last_switched"`
-	SrcAddr       netip.Addr  `json:"src_addr"`
-	DstAddr       netip.Addr  `json:"dst_addr"`
-	SrcPort       uint16      `json:"src_port"`
-	DstPort       uint16      `json:"dst_port"`
-	Protocol      uint8       `json:"protocol"`
-	TCPFlags      uint8       `json:"tcp_flags"`
-	Packets       uint64      `json:"packets"`
-	Bytes         uint64      `json:"bytes"`
-	SamplingRate  uint32      `json:"sampling_rate"`
-	InputIface    uint32      `json:"input_iface"`
-	OutputIface   uint32      `json:"output_iface"`
-	SrcAS         uint32      `json:"src_as"`
-	DstAS         uint32      `json:"dst_as"`
-	NextHop       *netip.Addr `json:"next_hop"`
-}
+// Message is the wire schema, defined once in internal/wire.
+type Message = wire.Message
 
 // Source is a Kafka consumer. Create it with New.
 type Source struct {
@@ -146,56 +124,14 @@ func (s *Source) commitOnShutdown(cl *kgo.Client) {
 	}
 }
 
-// Decode turns one message body into a record. recordTime is the Kafka
-// record's own timestamp, used only when the message carries no received_at.
+// Decode turns one message body into a record and stamps it with the
+// DedupKey that makes a redelivery collide with itself. recordTime is the
+// Kafka record's own timestamp, used only when the message carries no
+// received_at.
 func Decode(body []byte, recordTime time.Time) (flow.FlowRecord, error) {
-	var m Message
-	if err := json.Unmarshal(body, &m); err != nil {
-		return flow.FlowRecord{}, fmt.Errorf("kafka: decode: %w", err)
-	}
-	ft := flow.FlowType(m.FlowType)
-	switch {
-	case !m.ExporterAddr.IsValid():
-		return flow.FlowRecord{}, errors.New("kafka: decode: exporter_addr is required")
-	case !ft.Valid():
-		return flow.FlowRecord{}, fmt.Errorf("kafka: decode: unknown flow_type %q", m.FlowType)
-	case !m.SrcAddr.IsValid() || !m.DstAddr.IsValid():
-		return flow.FlowRecord{}, errors.New("kafka: decode: src_addr and dst_addr are required")
-	case m.FirstSwitched.IsZero() || m.LastSwitched.IsZero():
-		return flow.FlowRecord{}, errors.New("kafka: decode: first_switched and last_switched are required")
-	}
-	receivedAt := recordTime
-	if m.ReceivedAt != nil {
-		receivedAt = *m.ReceivedAt
-	}
-	if receivedAt.IsZero() {
-		return flow.FlowRecord{}, errors.New("kafka: decode: no received_at and no record timestamp")
-	}
-	r := flow.FlowRecord{
-		ReceivedAt:    receivedAt.UTC().Truncate(time.Microsecond),
-		ExporterAddr:  m.ExporterAddr.Unmap(),
-		FlowType:      ft,
-		FirstSwitched: m.FirstSwitched.UTC().Truncate(time.Microsecond),
-		LastSwitched:  m.LastSwitched.UTC().Truncate(time.Microsecond),
-		SrcAddr:       m.SrcAddr.Unmap(),
-		DstAddr:       m.DstAddr.Unmap(),
-		SrcPort:       m.SrcPort,
-		DstPort:       m.DstPort,
-		Protocol:      m.Protocol,
-		TCPFlags:      m.TCPFlags,
-		Packets:       m.Packets,
-		Bytes:         m.Bytes,
-		SamplingRate:  m.SamplingRate,
-		InputIface:    m.InputIface,
-		OutputIface:   m.OutputIface,
-		SrcAS:         m.SrcAS,
-		DstAS:         m.DstAS,
-	}
-	if r.SamplingRate == 0 {
-		r.SamplingRate = 1
-	}
-	if m.NextHop != nil && m.NextHop.IsValid() {
-		r.NextHop = m.NextHop.Unmap()
+	r, err := wire.Decode(body, recordTime)
+	if err != nil {
+		return flow.FlowRecord{}, fmt.Errorf("kafka: %w", err)
 	}
 	r.DedupKey = DedupKey(r)
 	return r, nil

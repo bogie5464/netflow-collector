@@ -41,6 +41,7 @@ func TestEncodeCarriesReceivedAtAndNullNextHop(t *testing.T) {
 	var m map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(body, &m))
 	require.Equal(t, "null", string(m["next_hop"]))
+	require.Equal(t, `"`+wire.Format+`"`, string(m["format"]), "every message names its schema for consumers outside this project")
 	require.NotEqual(t, "null", string(m["received_at"]), "received_at is always sent so a consumer never falls back to its own clock")
 }
 

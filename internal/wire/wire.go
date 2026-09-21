@@ -20,8 +20,15 @@ import (
 	"github.com/bogie5464/netflow-collector/internal/flow"
 )
 
+// Format is the value of every message's "format" field. Other teams'
+// consumers should check it, and this project changes the schema only by
+// adding fields; a change that would break a reader of Format gets a new
+// value and a new topic.
+const Format = "netflow-collector/v1"
+
 // Message is the wire schema.
 type Message struct {
+	Format        string      `json:"format"`
 	ExporterAddr  netip.Addr  `json:"exporter_addr"`
 	FlowType      string      `json:"flow_type"`
 	ReceivedAt    *time.Time  `json:"received_at"`
@@ -49,6 +56,7 @@ type Message struct {
 func Encode(r flow.FlowRecord) ([]byte, error) {
 	at := r.ReceivedAt.UTC().Truncate(time.Microsecond)
 	m := Message{
+		Format:        Format,
 		ExporterAddr:  r.ExporterAddr,
 		FlowType:      string(r.FlowType),
 		ReceivedAt:    &at,
